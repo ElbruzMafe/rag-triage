@@ -1,0 +1,55 @@
+# Eight questions asked against the Northwind Cloud docs, together with the answers a
+# real assistant gave. Every entry is one of the failure modes rag-triage separates.
+cases:
+  - id: refund-window
+    question: How long does a refund take to arrive?
+    gold: Refunds are returned to the original payment card within 5 business days.
+    answer: Refunds are returned to the original payment card within 14 business days.
+    tags: [billing]
+
+  - id: rate-limit
+    question: What is the API rate limit?
+    gold: The API allows 600 requests per minute per token.
+    answer: Each token is allowed 600 requests per minute.
+    tags: [api]
+
+  - id: page-size
+    question: How many items does a list endpoint return per page?
+    gold: List endpoints return at most 100 items per page and continue with a cursor.
+    answer: List endpoints return up to 100 items per page, and you page with next_cursor.
+    tags: [api]
+
+  - id: scim-provisioning
+    question: Does Northwind Cloud support SCIM provisioning with Okta?
+    gold: Northwind Cloud provisions users through SCIM 2.0 with Okta and Entra ID.
+    answer: Yes, SCIM provisioning is available for Okta on the Enterprise plan.
+    tags: [sso]
+
+  - id: webhook-retry
+    question: What happens when my endpoint is down and a webhook cannot be delivered?
+    gold: Failed deliveries are retried five times with exponential backoff, then the endpoint is disabled.
+    answer: Northwind Cloud retries a failed webhook three times over the next hour and then drops it.
+    # what the production retriever actually returned for this question
+    retrieved_ids:
+      - api.md#0
+      - api.md#1
+      - accounts.md#0
+    tags: [api, webhooks]
+
+  - id: backup-retention
+    question: How often are backups taken and how long are they kept?
+    gold: Backups run daily at 02:00 UTC and are retained for 30 days.
+    answer: Northwind Cloud streams continuous point-in-time snapshots into a customer managed bucket.
+    tags: [operations]
+
+  - id: seat-counting
+    question: When does an invited member start using a seat?
+    gold: A seat is consumed once a member signs in during the billing period; invited members who never sign in do not.
+    answer: null
+    tags: [accounts]
+
+  - id: downgrade-timing
+    question: When does a plan downgrade take effect?
+    gold: A downgrade takes effect at the start of the next billing period.
+    answer: Downgrades apply immediately and the seats are removed straight away.
+    tags: [billing]
