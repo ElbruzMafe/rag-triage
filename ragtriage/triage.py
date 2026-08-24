@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .models import CaseResult, EvalCase, Hit, Verdict
+from .claims import check_claims, unsupported
+from .models import CaseResult, ClaimCheck, EvalCase, Hit, Verdict
 from .retriever import BM25Retriever
 
 
@@ -13,6 +14,7 @@ class TriageConfig:
     k: int = 5
     support_scan: int = 25
     max_support: int = 3
+    claim_detail: bool = True
 
 
 def _rank_map(hits: list[Hit]) -> dict[str, int]:
@@ -82,18 +84,26 @@ def triage_case(
     match = judge.equivalent(case.gold, case.answer)
     grounded = judge.grounded(case.answer, passages)
 
+    # Per-claim checks cost one judge call per sentence per chunk, so they only run
+    # when the answer is not fully grounded - which is exactly when they are read.
+    claims = []
+    if not grounded.value and config.claim_detail:
+        claims = check_claims(case.answer, retrieved, judge)
+
     if match.value:
         if not grounded.value:
             notes.append(
                 "answer matches the gold answer but no retrieved chunk supports it - "
                 "the model may be answering from memory rather than from context"
             )
-        return CaseResult(case, Verdict.OK, support, retrieved, best_rank, notes)
+            notes.extend(_claim_notes(claims))
+        return CaseResult(case, Verdict.OK, support, retrieved, best_rank, notes, claims)
 
     notes.append(f"answer mismatch: {match.reason}")
     if not grounded.value:
         notes.append(f"groundedness: {grounded.reason}")
-        return CaseResult(case, Verdict.UNGROUNDED, support, retrieved, best_rank, notes)
+        notes.extend(_claim_notes(claims))
+        return CaseResult(case, Verdict.UNGROUNDED, support, retrieved, best_rank, notes, claims)
 
     return CaseResult(case, Verdict.GENERATION_MISS, support, retrieved, best_rank, notes)
 
@@ -112,6 +122,14 @@ def summarize(results: list[CaseResult]) -> dict[str, int]:
     for result in results:
         counts[result.verdict.value] += 1
     return counts
+
+
+def _claim_notes(claims: list[ClaimCheck]) -> list[str]:
+    """Name the sentences that nothing supports, rather than just saying "ungrounded"."""
+    loose = unsupported(claims)
+    if not loose or len(loose) == len(claims):
+        return []
+    return [f"unsupported sentence: {check.text!r}" for check in loose]
 
 
 def _rank_note(best_rank: int | None, k: int, recorded: bool) -> str:

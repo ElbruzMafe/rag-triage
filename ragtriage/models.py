@@ -49,6 +49,17 @@ class Assessment:
     reason: str
 
 
+@dataclass(frozen=True)
+class ClaimCheck:
+    """One sentence of an answer, and the retrieved chunk that supports it."""
+
+    text: str
+    supported: bool
+    confidence: float
+    chunk_id: str | None
+    reason: str
+
+
 class Verdict(str, Enum):
     OK = "ok"
     MISSING_FROM_CORPUS = "missing_from_corpus"
@@ -76,6 +87,7 @@ class CaseResult:
     retrieved: list[Hit]
     best_support_rank: int | None
     notes: list[str] = field(default_factory=list)
+    claims: list[ClaimCheck] = field(default_factory=list)
 
     @property
     def fix_hint(self) -> str:

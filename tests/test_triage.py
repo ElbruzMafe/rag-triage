@@ -157,3 +157,43 @@ def test_summarize_counts_every_verdict(retriever, judge):
     assert counts["ok"] == 1
     assert counts["missing_from_corpus"] == 1
     assert sum(counts.values()) == 2
+
+
+def test_ungrounded_names_the_sentence_nothing_supports(retriever, judge):
+    case = EvalCase(
+        id="c",
+        question="how often do backups run",
+        gold="Database backups run daily at 02:00 UTC and are retained for 30 days.",
+        answer=(
+            "Database backups run daily at 02:00 UTC. "
+            "A courier delivers an encrypted tape to your office every Friday."
+        ),
+    )
+    result = run(case, retriever, judge)
+    assert result.verdict is Verdict.UNGROUNDED
+    assert [check.supported for check in result.claims] == [True, False]
+    assert result.claims[0].chunk_id == "ops.md#0"
+    assert any(note.startswith("unsupported sentence: 'A courier") for note in result.notes)
+
+
+def test_claim_detail_can_be_turned_off(retriever, judge):
+    case = EvalCase(
+        id="c",
+        question="how often do backups run",
+        gold="Database backups run daily at 02:00 UTC and are retained for 30 days.",
+        answer="A courier delivers an encrypted tape to your office every Friday.",
+    )
+    assert run(case, retriever, judge, claim_detail=False).claims == []
+
+
+def test_a_grounded_answer_costs_no_claim_checks(retriever, judge):
+    """Per-sentence checks are only worth their judge calls when something is unsupported."""
+    case = EvalCase(
+        id="c",
+        question="how long does a refund take",
+        gold="Refunds are returned to the original payment card within 5 business days.",
+        answer="Refunds are returned to the original payment card within 14 business days.",
+    )
+    result = run(case, retriever, judge)
+    assert result.verdict is Verdict.GENERATION_MISS
+    assert result.claims == []
