@@ -53,3 +53,13 @@ cases:
     gold: A downgrade takes effect at the start of the next billing period.
     answer: Downgrades apply immediately and the seats are removed straight away.
     tags: [billing]
+
+  # Two sentences: the first is grounded but has the wrong figure, the second is
+  # invented outright. This is the case the per-sentence check exists for.
+  - id: incident-sla
+    question: How quickly are incidents published after they are detected?
+    gold: Incidents are published on the status page within 15 minutes of detection.
+    answer: >-
+      Incidents are published on the status page within 60 minutes of detection.
+      Our on-call engineer phones every affected customer before anything is posted.
+    tags: [operations]
