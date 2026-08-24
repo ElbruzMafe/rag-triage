@@ -23,7 +23,7 @@ with it.
 Run against the sample docs in `examples/`:
 
 ```
-rag-triage  8 cases  |  16 chunks  |  judge lexical  |  k=5
+rag-triage  9 cases  |  16 chunks  |  judge lexical  |  k=5
 
   case               verdict              support rank
   -----------------  -------------------  ------------
@@ -32,20 +32,21 @@ rag-triage  8 cases  |  16 chunks  |  judge lexical  |  k=5
   refund-window      generation_miss      #1
   backup-retention   ungrounded           #1
   downgrade-timing   ungrounded           #1
+  incident-sla       ungrounded           #1
   seat-counting      no_answer            #1
-  rate-limit         ok                   #1
   page-size          ok                   #1
+  rate-limit         ok                   #1
 
 summary
   missing_from_corpus 1
   retrieval_miss      1
   generation_miss     1
-  ungrounded          2
+  ungrounded          3
   no_answer           1
   ok                  2
 
 what to fix first
-  2x ungrounded -> the answer states things no retrieved chunk supports - tighten the prompt or add a citation check
+  3x ungrounded -> the answer states things no retrieved chunk supports - tighten the prompt or add a citation check
   1x missing_from_corpus -> the evidence is not in the corpus - fix ingestion, not the prompt
   1x retrieval_miss -> evidence exists but never reached the model - fix chunking, embeddings or k
   1x generation_miss -> the model had the evidence and still got it wrong - fix the prompt or the model
@@ -56,6 +57,53 @@ The `support rank` column is the position the supporting chunk gets in a plain B
 ranking of the question. For a `retrieval_miss` that number is the actionable part: if
 it says `#9` and you are retrieving `k=5`, raising k fixes the case; if it says `-`, no
 amount of k helps and the chunking or the embedding is the problem.
+
+## Drilling into one case
+
+The table tells you which stage broke; `--explain` tells you why it says so.
+
+```
+$ rag-triage --corpus examples/corpus --evalset examples/evalset.yaml --explain incident-sla
+
+case     incident-sla
+verdict  ungrounded  (stage: generation)
+fix      the answer states things no retrieved chunk supports - tighten the prompt or add a citation check
+
+question
+  How quickly are incidents published after they are detected?
+gold
+  Incidents are published on the status page within 15 minutes of detection.
+answer
+  Incidents are published on the status page within 60 minutes of detection. Our on-call engineer phones every affected customer before anything is posted.
+
+evidence for the gold answer
+  #1  operations.md#2     score 20.283    Status and incidents
+
+retrieved context (3 chunks)
+  #1  operations.md#2     score 6.7672    Status and incidents  <- supporting
+  #2  api.md#3            score 2.7242    Webhooks
+  #3  api.md#1            score 1.6598    Rate limits
+
+answer sentences
+  ok  [operations.md#2] Incidents are published on the status page within 60 minutes of detection.
+  !!  [unsupported] Our on-call engineer phones every affected customer before anything is posted.
+
+notes
+  - answer mismatch: figures disagree: gold has ['15'], answer has ['60']
+  - groundedness: 8/17 claim terms present in passage (across 3 retrieved passages)
+  - unsupported sentence: 'Our on-call engineer phones every affected customer before anything is posted.'
+```
+
+The `answer sentences` block is the part worth having. "This answer is ungrounded" is
+a label; "this sentence is the invented one, and here is the chunk that backs the other
+one" is a fix. Note that the first sentence is marked supported even though its figure
+is wrong - grounded and correct are different questions, and the figure is caught one
+line above by the answer mismatch. Per-sentence checks only run when the whole-answer
+groundedness check has already failed, so they cost nothing on healthy cases.
+
+`--html report.html` writes the same detail for every case as one self-contained file:
+counts per verdict at the top, then a collapsible card per case with the retrieved
+chunks, the supporting one highlighted, and the sentence breakdown.
 
 ## The verdicts
 
@@ -79,9 +127,12 @@ at all.
 - Two judges behind one interface: an offline token-overlap judge, and a Claude judge
   for eval sets whose wording differs from the corpus
 - Evidence location - finds which chunks back the gold answer, anywhere in the corpus
+- Per-sentence grounding: which sentence of the answer no retrieved chunk supports
 - Works from recorded traces: put the chunk ids your production retriever returned in
   the eval set and rag-triage grades those instead of running its own search
-- Text, markdown and JSON reports; `--strict` exits non-zero for CI
+- `--explain <case-id>` for the full trace of a single case
+- Text, markdown, HTML and JSON reports; `--strict` exits non-zero for CI
+- Call, token and cost accounting for the Claude judge
 
 ## Tech stack
 
@@ -108,10 +159,16 @@ export ANTHROPIC_API_KEY=...        # see .env.example
 rag-triage --corpus examples/corpus --evalset examples/evalset.yaml --judge claude
 ```
 
+Every run with the Claude judge ends with a `judge usage` line: how many API calls it
+made, how many of those were served from the in-process cache, the input and output
+tokens, and an estimated cost from the published per-token price for the model. The
+bundled nine-case example needs 89 judge calls, or 80 with `--no-claim-detail`.
+
 Reports:
 
 ```bash
-rag-triage --corpus docs/ --evalset eval.yaml --json out.json --markdown report.md --strict
+rag-triage --corpus docs/ --evalset eval.yaml \
+  --json out.json --markdown report.md --html report.html --strict
 ```
 
 ### Eval set format
@@ -137,9 +194,10 @@ ragtriage/
   corpus.py        document loading, chunking, eval set parsing
   retriever.py     BM25 index and tokenizer
   judge.py         Judge protocol and the offline lexical judge
-  claude_judge.py  Claude judge, same protocol
+  claude_judge.py  Claude judge, same protocol, plus usage accounting
+  claims.py        sentence splitting and per-sentence grounding
   triage.py        the decision tree that assigns a verdict
-  report.py        text, markdown and JSON rendering
+  report.py        text, markdown, HTML and JSON rendering
   cli.py           argparse entry point
 examples/          sample docs and an eval set covering every verdict
 tests/             pytest suite
@@ -159,4 +217,8 @@ tests/             pytest suite
 - Evidence location scans the top `--support-scan` BM25 candidates rather than the whole
   corpus, so a gold answer sharing no vocabulary with its source chunk can be reported
   as `missing_from_corpus`.
-- No per-case cost accounting for the Claude judge yet.
+- Sentence splitting is a regex with an abbreviation list. It handles decimals, version
+  numbers and `e.g.`, and it will merge two sentences when the second starts with a
+  lowercase word. Bulleted or tabular answers are treated as one sentence.
+- Judge cost is reported per run, not per case, and the Claude judge does not use prompt
+  caching yet even though the system prompt is identical on every call.

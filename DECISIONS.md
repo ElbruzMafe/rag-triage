@@ -86,3 +86,49 @@ setup is worth a look.
 One command with ten flags does not need click or typer. The whole CLI is one file and
 `main(argv)` takes its arguments as a list, so the tests call it directly instead of
 spawning subprocesses.
+
+## Per-sentence grounding, but only after the answer already failed
+
+"Ungrounded" was a true statement that nobody could act on. A wrong answer is usually
+one invented sentence attached to two correct ones, and the invented sentence is the
+whole finding. So the answer is split into sentences and each one is matched against
+the retrieved chunks. The obvious cost is judge calls: sentences x retrieved chunks per
+case, which is affordable for the lexical judge and not for Claude. The check therefore
+runs only when the whole-answer groundedness call has already come back false, which is
+exactly the set of cases where someone will read the result. On the bundled example that
+is 89 judge calls instead of 80 - the detail is nine calls, not a second pipeline.
+
+## Sentence splitting is a regex, not a parser
+
+An answer is a few sentences of product English, not arbitrary text, so the boundary
+rule is: sentence-final punctuation, then whitespace, then something that looks like the
+start of a sentence. Decimals need no special case, because "5.5" has no whitespace
+after the period. Abbreviations do, so there is a short list of them. The failure mode
+is a sentence starting with a lowercase word, which gets merged into the previous one -
+visible in the output, not silent, and cheaper than depending on a sentence tokeniser.
+
+## Grounded and correct stay separate
+
+The per-sentence check can mark a sentence supported while the case is still wrong: in
+the bundled `incident-sla` case the model wrote "within 60 minutes" where the corpus
+says 15, and enough of the sentence matches the chunk that it reads as grounded. That is
+not a bug to paper over. Groundedness asks whether the context backs the wording;
+correctness asks whether the fact is right, and `equivalent` already answers that on the
+line above. Collapsing the two would hide which of the two properties a system lacks,
+which is the whole point of the tool.
+
+## An HTML report, because the interesting part is the chunks
+
+The text report has to fit a terminal, so it shows one line per case. The thing you
+actually want when a verdict looks wrong is the retrieved chunk text next to the answer,
+and that does not fit. The HTML report is one file with no external requests: inline CSS,
+a collapsible card per case, and the supporting chunk highlighted in the retrieval table.
+No build step, no JavaScript, and it can be attached to a CI run or a ticket as-is.
+
+## Cost accounting lives on the judge, not in the CLI
+
+The Claude judge counts its own calls, cache hits and tokens, and converts them with a
+small per-model price table. The CLI prints the line only if the judge exposes a `usage`
+attribute, so the lexical judge stays free of an accounting concept it does not need and
+a third judge would get the reporting for nothing. Unknown model ids report calls and
+tokens but no dollar figure, rather than guessing a price.
