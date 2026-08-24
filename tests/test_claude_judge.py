@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ragtriage.claude_judge import ClaudeJudge
+from ragtriage.claude_judge import ClaudeJudge, Usage
 
 
 class FakeMessages:
@@ -14,7 +14,8 @@ class FakeMessages:
     def create(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(
-            content=[SimpleNamespace(type="text", text=json.dumps(self.payload))]
+            content=[SimpleNamespace(type="text", text=json.dumps(self.payload))],
+            usage=SimpleNamespace(input_tokens=120, output_tokens=30),
         )
 
 
@@ -70,3 +71,36 @@ def test_grounded_joins_the_passages(judge):
     judge.grounded("answer", ["one", "two"])
     prompt = judge.client.messages.calls[0]["messages"][0]["content"]
     assert "one\n\n---\n\ntwo" in prompt
+
+
+def test_usage_counts_calls_tokens_and_cache_hits(judge):
+    judge.supports("claim", "passage")
+    judge.supports("claim", "passage")
+    judge.equivalent("gold", "actual")
+
+    assert judge.usage.calls == 2
+    assert judge.usage.cached == 1
+    assert judge.usage.input_tokens == 240
+    assert judge.usage.output_tokens == 60
+    assert judge.usage.cost == pytest.approx((240 * 5.0 + 60 * 25.0) / 1_000_000)
+
+
+def test_usage_survives_a_response_without_a_usage_block():
+    class NoUsage(FakeMessages):
+        def create(self, **kwargs):
+            response = super().create(**kwargs)
+            del response.usage
+            return response
+
+    judge = ClaudeJudge(client=SimpleNamespace(messages=NoUsage({
+        "verdict": True, "confidence": 1.0, "reason": "r"
+    })))
+    judge.supports("claim", "passage")
+    assert judge.usage.calls == 1
+    assert judge.usage.input_tokens == 0
+
+
+def test_an_unknown_model_reports_no_cost():
+    usage = Usage(model="some-future-model", calls=1, input_tokens=10, output_tokens=2)
+    assert usage.cost is None
+    assert "$" not in usage.summary()

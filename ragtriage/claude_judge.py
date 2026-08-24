@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 from .models import Assessment
 
 MODEL = "claude-opus-5"
+
+# USD per million tokens, input then output. Unknown models simply report no cost.
+PRICES = {
+    "claude-opus-5": (5.0, 25.0),
+    "claude-sonnet-5": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
 
 SYSTEM = (
     "You grade a retrieval-augmented question answering system. "
@@ -27,6 +35,34 @@ SCHEMA = {
 }
 
 
+@dataclass
+class Usage:
+    """What the judge spent. Triage asks a lot of small questions, so the call count
+    matters as much as the bill."""
+
+    model: str
+    calls: int = 0
+    cached: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def cost(self) -> float | None:
+        price = PRICES.get(self.model)
+        if price is None:
+            return None
+        return (self.input_tokens * price[0] + self.output_tokens * price[1]) / 1_000_000
+
+    def summary(self) -> str:
+        parts = [
+            f"{self.calls} judge calls ({self.cached} served from cache)",
+            f"{self.input_tokens} in / {self.output_tokens} out tokens",
+        ]
+        if self.cost is not None:
+            parts.append(f"~${self.cost:.4f}")
+        return "  |  ".join(parts)
+
+
 class ClaudeJudge:
     """Same interface as LexicalJudge, one API call per question.
 
@@ -44,6 +80,7 @@ class ClaudeJudge:
         self.client = client
         self.model = model
         self.effort = effort
+        self.usage = Usage(model=model)
         self._cache: dict[tuple[str, str, str], Assessment] = {}
 
     def supports(self, claim: str, passage: str) -> Assessment:
@@ -85,6 +122,7 @@ class ClaudeJudge:
     def _ask(self, kind: str, left: str, right: str, prompt: str) -> Assessment:
         key = (kind, left, right)
         if key in self._cache:
+            self.usage.cached += 1
             return self._cache[key]
 
         response = self.client.messages.create(
@@ -97,6 +135,7 @@ class ClaudeJudge:
                 "format": {"type": "json_schema", "schema": SCHEMA},
             },
         )
+        self._record(response)
         text = next(block.text for block in response.content if block.type == "text")
         data = json.loads(text)
         assessment = Assessment(
@@ -106,3 +145,11 @@ class ClaudeJudge:
         )
         self._cache[key] = assessment
         return assessment
+
+    def _record(self, response) -> None:
+        self.usage.calls += 1
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        self.usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
+        self.usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
