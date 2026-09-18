@@ -109,3 +109,38 @@ def test_every_verdict_renders_in_every_format(verdict):
     assert render_markdown(one)
     assert render_html(one, chunks=1, judge="lexical", k=5)
     assert to_dict(one)["cases"][0]["verdict"] == verdict.value
+
+
+def test_html_filter_wires_every_tile_to_its_cards():
+    """Each tile is a label for a radio, and a CSS rule hides the other verdicts.
+
+    Nothing here checks that a browser honours it, but it does catch the mismatch
+    that would break it: a card class and a filter rule that disagree.
+    """
+    results = [result(Verdict.UNGROUNDED), result(Verdict.OK), result(Verdict.OK)]
+    html = render_html(results, chunks=16, judge="lexical", k=5, retriever="bm25")
+
+    for verdict in ("ungrounded", "ok"):
+        assert f'<input type="radio" name="filter" id="f-{verdict}">' in html
+        assert f'<label class="tile {verdict}" for="f-{verdict}">' in html
+        assert f"#f-{verdict}:checked ~ .cards .case:not(.v-{verdict}) {{ display:none }}" in html
+        assert f'class="case v-{verdict}"' in html
+
+    # verdicts with no cases get no tile and no dead CSS rule
+    assert "f-retrieval_miss" not in html
+    assert html.count('type="radio"') == 3  # all, ungrounded, ok
+    assert '<label class="tile all" for="f-all"><b>3</b>' in html
+
+
+def test_html_shows_the_tags_and_the_retriever():
+    html = render_html([result()], chunks=16, judge="lexical", k=5, retriever="vectors:mini")
+    assert '<span class="tag">operations</span>' in html
+    assert "retriever vectors:mini" in html
+
+
+def test_html_stays_wellformed_with_the_filter_markup():
+    results = [result(Verdict.UNGROUNDED), result(Verdict.MISSING_FROM_CORPUS, support=())]
+    parser = Wellformed()
+    parser.feed(render_html(results, chunks=16, judge="lexical", k=5))
+    assert parser.errors == []
+    assert parser.stack == []

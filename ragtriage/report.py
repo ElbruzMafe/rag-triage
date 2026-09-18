@@ -149,11 +149,23 @@ def render_html(
 ) -> str:
     counts = summarize(results)
     failed = sum(counts[v.value] for v in _ORDER if v is not Verdict.OK)
+    present = [v for v in _ORDER if counts[v.value]]
 
-    tiles = "".join(
-        f'<div class="tile {v.value}"><b>{counts[v.value]}</b><span>{v.value}</span></div>'
-        for v in _ORDER
-        if counts[v.value]
+    # The tiles double as filters: a hidden radio per verdict, and CSS that hides the
+    # cards of every other verdict. Keeps the report one file with no JavaScript.
+    radios = '<input type="radio" name="filter" id="f-all" checked>' + "".join(
+        f'<input type="radio" name="filter" id="f-{v.value}">' for v in present
+    )
+    tiles = f'<label class="tile all" for="f-all"><b>{len(results)}</b><span>all</span></label>'
+    tiles += "".join(
+        f'<label class="tile {v.value}" for="f-{v.value}">'
+        f"<b>{counts[v.value]}</b><span>{v.value}</span></label>"
+        for v in present
+    )
+    filter_css = "\n".join(
+        f"#f-{v.value}:checked ~ .cards .case:not(.v-{v.value}) {{ display:none }}\n"
+        f'#f-{v.value}:checked ~ .tiles label[for="f-{v.value}"] {{ background:#000 }}'
+        for v in present
     )
 
     cards = []
@@ -176,14 +188,16 @@ def render_html(
             ", ".join(f"<code>{escape(hit.chunk.id)}</code>" for hit in result.support)
             or "nothing in the corpus"
         )
+        tags = "".join(f'<span class="tag">{escape(tag)}</span>' for tag in result.case.tags)
         cards.append(
-            f"""<details class="case">
+            f"""<details class="case v-{result.verdict.value}">
 <summary><span class="chip {result.verdict.value}">{result.verdict.value}</span>
 <b>{escape(result.case.id)}</b><em>{escape(_preview(result.case.question, 90))}</em></summary>
 <p class="fix">{escape(result.fix_hint)}</p>
 <dl><dt>gold</dt><dd>{escape(result.case.gold)}</dd>
 <dt>answer</dt><dd>{escape(result.case.answer or "(none recorded)")}</dd>
-<dt>evidence</dt><dd>{evidence}</dd></dl>
+<dt>evidence</dt><dd>{evidence}</dd>
+{f"<dt>tags</dt><dd>{tags}</dd>" if tags else ""}</dl>
 {f'<h4>answer sentences</h4><ul class="claims">{claims}</ul>' if claims else ""}
 <h4>retrieved context</h4>
 {f"<table>{rows}</table>" if rows else "<p>nothing retrieved</p>"}
@@ -198,7 +212,9 @@ def render_html(
         judge=escape(judge),
         retriever=escape(retriever),
         k=k,
+        radios=radios,
         tiles=tiles,
+        filter_css=filter_css,
         cards="\n".join(cards),
     )
 
@@ -262,9 +278,15 @@ h1 {{ font-size:1.5rem; margin:0 0 .25rem }}
 .meta {{ color:var(--dim); margin:0 0 1.5rem }}
 .tiles {{ display:flex; flex-wrap:wrap; gap:.6rem; margin-bottom:1.5rem }}
 .tile {{ flex:1 1 120px; background:var(--card); border:1px solid var(--line);
-  border-left-width:4px; border-radius:8px; padding:.7rem .9rem }}
+  border-left-width:4px; border-radius:8px; padding:.7rem .9rem; cursor:pointer;
+  user-select:none }}
+.tile:hover {{ border-color:var(--dim) }}
 .tile b {{ display:block; font-size:1.6rem; line-height:1.1 }}
 .tile span {{ color:var(--dim); font-size:.8rem }}
+.tile.all {{ border-left-color:var(--dim) }}
+input[name="filter"] {{ display:none }}
+#f-all:checked ~ .tiles label[for="f-all"] {{ background:#000 }}
+{filter_css}
 .missing_from_corpus {{ border-left-color:var(--corpus) }}
 .retrieval_miss {{ border-left-color:var(--retrieval) }}
 .generation_miss, .ungrounded {{ border-left-color:var(--generation) }}
@@ -294,11 +316,14 @@ ul {{ margin:.3rem 0; padding-left:1.1rem; color:var(--dim) }}
   background:#0006; color:var(--text) }}
 .claims li.bad {{ border-left-color:var(--corpus) }}
 .claims span {{ display:block; color:var(--dim); font-size:.75rem }}
+.tag {{ display:inline-block; font-size:.72rem; color:var(--dim); border:1px solid var(--line);
+  border-radius:99px; padding:.05rem .5rem; margin-right:.3rem }}
 </style></head><body><main>
 <h1>rag-triage report</h1>
 <p class="meta">{cases} cases &middot; {failed} not ok &middot; {chunks} chunks &middot;
 retriever {retriever} &middot; judge {judge} &middot; k={k}</p>
+{radios}
 <div class="tiles">{tiles}</div>
-{cards}
+<div class="cards">{cards}</div>
 </main></body></html>
 """
