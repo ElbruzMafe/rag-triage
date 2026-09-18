@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from .claims import check_claims, unsupported
 from .models import CaseResult, ClaimCheck, EvalCase, Hit, Verdict
-from .retriever import BM25Retriever
+from .retriever import Retriever
 
 
 @dataclass
@@ -22,7 +22,7 @@ def _rank_map(hits: list[Hit]) -> dict[str, int]:
 
 
 def find_support(
-    retriever: BM25Retriever,
+    retriever: Retriever,
     judge,
     gold: str,
     config: TriageConfig,
@@ -45,7 +45,7 @@ def find_support(
 
 def triage_case(
     case: EvalCase,
-    retriever: BM25Retriever,
+    retriever: Retriever,
     judge,
     config: TriageConfig | None = None,
 ) -> CaseResult:
@@ -74,7 +74,7 @@ def triage_case(
 
     retrieved_ids = {hit.chunk.id for hit in retrieved}
     if not (support_ids & retrieved_ids):
-        notes.append(_rank_note(best_rank, len(retrieved), recorded))
+        notes.append(_rank_note(best_rank, len(retrieved), recorded, retriever.name))
         return CaseResult(case, Verdict.RETRIEVAL_MISS, support, retrieved, best_rank, notes)
 
     if not (case.answer or "").strip():
@@ -110,7 +110,7 @@ def triage_case(
 
 def triage_all(
     cases: list[EvalCase],
-    retriever: BM25Retriever,
+    retriever: Retriever,
     judge,
     config: TriageConfig | None = None,
 ) -> list[CaseResult]:
@@ -132,7 +132,7 @@ def _claim_notes(claims: list[ClaimCheck]) -> list[str]:
     return [f"unsupported sentence: {check.text!r}" for check in loose]
 
 
-def _rank_note(best_rank: int | None, k: int, recorded: bool) -> str:
+def _rank_note(best_rank: int | None, k: int, recorded: bool, backend: str = "bm25") -> str:
     if best_rank is None:
         return (
             "no supporting chunk scores at all for this question - the wording of the "
@@ -140,13 +140,13 @@ def _rank_note(best_rank: int | None, k: int, recorded: bool) -> str:
         )
     if recorded:
         return (
-            f"the retriever under test missed it, but a plain BM25 baseline puts the "
+            f"the retriever under test missed it, but the {backend} baseline puts the "
             f"supporting chunk at #{best_rank} for this question"
         )
     return f"the supporting chunk ranks #{best_rank} for this question; k would have to be at least {best_rank}, it is {k}"
 
 
-def _hits_for_ids(ids: list[str], retriever: BM25Retriever) -> list[Hit]:
+def _hits_for_ids(ids: list[str], retriever: Retriever) -> list[Hit]:
     by_id = {chunk.id: chunk for chunk in retriever.chunks}
     hits = []
     for position, chunk_id in enumerate(ids, start=1):

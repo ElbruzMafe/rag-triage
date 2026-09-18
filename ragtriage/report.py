@@ -31,9 +31,12 @@ def by_verdict(results: list[CaseResult]) -> list[CaseResult]:
     return sorted(results, key=lambda r: (_ORDER.index(r.verdict), r.case.id))
 
 
-def render_text(results: list[CaseResult], *, chunks: int, judge: str, k: int) -> str:
+def render_text(
+    results: list[CaseResult], *, chunks: int, judge: str, k: int, retriever: str = "bm25"
+) -> str:
     lines = [
-        f"rag-triage  {len(results)} cases  |  {chunks} chunks  |  judge {judge}  |  k={k}",
+        f"rag-triage  {len(results)} cases  |  {chunks} chunks  |  "
+        f"retriever {retriever}  |  judge {judge}  |  k={k}",
         "",
     ]
 
@@ -141,7 +144,9 @@ def render_markdown(results: list[CaseResult]) -> str:
     return "\n".join(lines)
 
 
-def render_html(results: list[CaseResult], *, chunks: int, judge: str, k: int) -> str:
+def render_html(
+    results: list[CaseResult], *, chunks: int, judge: str, k: int, retriever: str = "bm25"
+) -> str:
     counts = summarize(results)
     failed = sum(counts[v.value] for v in _ORDER if v is not Verdict.OK)
 
@@ -191,6 +196,7 @@ def render_html(results: list[CaseResult], *, chunks: int, judge: str, k: int) -
         failed=failed,
         chunks=chunks,
         judge=escape(judge),
+        retriever=escape(retriever),
         k=k,
         tiles=tiles,
         cards="\n".join(cards),
@@ -291,7 +297,7 @@ ul {{ margin:.3rem 0; padding-left:1.1rem; color:var(--dim) }}
 </style></head><body><main>
 <h1>rag-triage report</h1>
 <p class="meta">{cases} cases &middot; {failed} not ok &middot; {chunks} chunks &middot;
-judge {judge} &middot; k={k}</p>
+retriever {retriever} &middot; judge {judge} &middot; k={k}</p>
 <div class="tiles">{tiles}</div>
 {cards}
 </main></body></html>

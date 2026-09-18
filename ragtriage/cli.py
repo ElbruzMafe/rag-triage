@@ -13,6 +13,7 @@ from .models import Verdict
 from .report import render_case, render_html, render_markdown, render_text, to_dict
 from .retriever import BM25Retriever
 from .triage import TriageConfig, triage_all
+from .vectors import VectorRetriever, embed_inputs, load_vectors
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,6 +33,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=25,
         help="how many candidate chunks per case get judged when looking for the evidence",
+    )
+    parser.add_argument(
+        "--vectors",
+        metavar="FILE",
+        help="JSON file of chunk and query vectors; rank by cosine instead of BM25",
+    )
+    parser.add_argument(
+        "--embed-inputs",
+        dest="embed_inputs",
+        metavar="FILE",
+        help="write the chunk and query texts that a --vectors file must cover, then exit",
     )
     parser.add_argument(
         "--explain",
@@ -68,6 +80,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"rag-triage: no .md or .txt documents under {args.corpus}", file=sys.stderr)
         return 2
 
+    if args.embed_inputs:
+        payload = embed_inputs(chunks, cases)
+        try:
+            Path(args.embed_inputs).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError as exc:
+            print(f"rag-triage: could not write {args.embed_inputs}: {exc}", file=sys.stderr)
+            return 2
+        print(
+            f"wrote {len(payload['chunks'])} chunk texts and "
+            f"{len(payload['queries'])} query texts to {args.embed_inputs}"
+        )
+        return 0
+
     if args.explain and not any(case.id == args.explain for case in cases):
         known = ", ".join(case.id for case in cases)
         print(f"rag-triage: no case {args.explain!r} in the eval set. Known ids: {known}",
@@ -85,20 +110,33 @@ def main(argv: list[str] | None = None) -> int:
     if args.explain:
         cases = [case for case in cases if case.id == args.explain]
 
-    retriever = BM25Retriever(chunks)
+    try:
+        retriever = _build_retriever(chunks, args.vectors)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        print(f"rag-triage: {exc}", file=sys.stderr)
+        return 2
+
     config = TriageConfig(
         k=args.k, support_scan=args.support_scan, claim_detail=not args.no_claim_detail
     )
     try:
         results = triage_all(cases, retriever, judge, config)
-    except ValueError as exc:
+    except (ValueError, LookupError) as exc:
         print(f"rag-triage: {exc}", file=sys.stderr)
         return 2
 
     if args.explain:
         print(render_case(results[0]))
     else:
-        print(render_text(results, chunks=len(chunks), judge=judge.name, k=args.k))
+        print(
+            render_text(
+                results,
+                chunks=len(chunks),
+                judge=judge.name,
+                k=args.k,
+                retriever=retriever.name,
+            )
+        )
 
     usage = getattr(judge, "usage", None)
     if usage is not None and usage.calls:
@@ -111,7 +149,13 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.md_out).write_text(render_markdown(results), encoding="utf-8")
         if args.html_out:
             Path(args.html_out).write_text(
-                render_html(results, chunks=len(chunks), judge=judge.name, k=args.k),
+                render_html(
+                    results,
+                    chunks=len(chunks),
+                    judge=judge.name,
+                    k=args.k,
+                    retriever=retriever.name,
+                ),
                 encoding="utf-8",
             )
     except OSError as exc:
@@ -120,6 +164,13 @@ def main(argv: list[str] | None = None) -> int:
 
     failed = any(result.verdict is not Verdict.OK for result in results)
     return 1 if (args.strict and failed) else 0
+
+
+def _build_retriever(chunks, vectors_path):
+    if not vectors_path:
+        return BM25Retriever(chunks)
+    chunk_vectors, query_vectors, model = load_vectors(vectors_path)
+    return VectorRetriever(chunks, chunk_vectors, query_vectors, model=model)
 
 
 if __name__ == "__main__":

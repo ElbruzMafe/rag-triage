@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from typing import Protocol
 
 from .models import Chunk, Hit
 
@@ -51,8 +52,25 @@ def stem(word: str) -> str:
     return word
 
 
+class Retriever(Protocol):
+    """What triage needs from a ranking backend, and nothing more.
+
+    Two methods and a name is the whole contract, which is what makes a vector
+    backend an addition rather than a rewrite.
+    """
+
+    name: str
+    chunks: list[Chunk]
+
+    def score_all(self, query: str) -> list[Hit]: ...
+
+    def search(self, query: str, k: int = 5) -> list[Hit]: ...
+
+
 class BM25Retriever:
     """Classic BM25 ranking. Small corpora only - everything stays in memory."""
+
+    name = "bm25"
 
     def __init__(self, chunks: list[Chunk], k1: float = 1.5, b: float = 0.75):
         self.chunks = list(chunks)

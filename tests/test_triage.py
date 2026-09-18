@@ -62,7 +62,7 @@ def test_evidence_exists_but_was_not_retrieved(retriever, judge):
     result = run(case, retriever, judge)
     assert result.verdict is Verdict.RETRIEVAL_MISS
     assert result.best_support_rank == 1
-    assert any("BM25 baseline" in note for note in result.notes)
+    assert any("bm25 baseline" in note for note in result.notes)
 
 
 def test_k_too_small_is_a_retrieval_miss(retriever, judge):

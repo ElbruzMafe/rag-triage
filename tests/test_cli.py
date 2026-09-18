@@ -1,3 +1,4 @@
+import sys
 import json
 from pathlib import Path
 
@@ -96,3 +97,64 @@ def test_empty_corpus_directory_exits_with_two(tmp_path, capsys):
     code = main(["--corpus", str(tmp_path), "--evalset", str(EXAMPLES / "evalset.yaml")])
     assert code == 2
     assert "no .md or .txt documents" in capsys.readouterr().err
+
+
+def test_embed_inputs_then_vectors_round_trip(tmp_path, capsys):
+    """The documented path: export the texts, embed them, run against the vectors."""
+    inputs = tmp_path / "inputs.json"
+    assert main(ARGS + ["--embed-inputs", str(inputs)]) == 0
+    assert "16 chunk texts" in capsys.readouterr().out
+
+    payload = json.loads(inputs.read_text())
+    assert len(payload["chunks"]) == 16
+    assert "What is the API rate limit?" in payload["queries"]
+
+    sys.path.insert(0, str(EXAMPLES))
+    from hash_vectors import embed
+
+    vectors = tmp_path / "vectors.json"
+    vectors.write_text(
+        json.dumps(
+            {
+                "model": "test",
+                "chunks": {cid: embed(text) for cid, text in payload["chunks"].items()},
+                "queries": {text: embed(text) for text in payload["queries"]},
+            }
+        )
+    )
+
+    assert main(ARGS + ["--vectors", str(vectors)]) == 0
+    out = capsys.readouterr().out
+    assert "retriever vectors:test" in out
+    assert "9 cases" in out
+
+
+def test_vectors_built_from_a_different_chunking_is_rejected(tmp_path, capsys):
+    inputs = tmp_path / "inputs.json"
+    main(ARGS + ["--embed-inputs", str(inputs)])
+    payload = json.loads(inputs.read_text())
+    vectors = tmp_path / "vectors.json"
+    vectors.write_text(
+        json.dumps({"chunks": {cid: [1.0, 2.0] for cid in payload["chunks"]}})
+    )
+
+    assert main(ARGS + ["--vectors", str(vectors), "--max-chars", "300"]) == 2
+    assert "different chunking" in capsys.readouterr().err
+
+
+def test_missing_query_vector_reports_the_text(tmp_path, capsys):
+    inputs = tmp_path / "inputs.json"
+    main(ARGS + ["--embed-inputs", str(inputs)])
+    payload = json.loads(inputs.read_text())
+    vectors = tmp_path / "vectors.json"
+    vectors.write_text(
+        json.dumps({"chunks": {cid: [1.0, 2.0] for cid in payload["chunks"]}})
+    )
+
+    assert main(ARGS + ["--vectors", str(vectors)]) == 2
+    assert "use --embed-inputs" in capsys.readouterr().err
+
+
+def test_missing_vectors_file_is_an_error(capsys, tmp_path):
+    assert main(ARGS + ["--vectors", str(tmp_path / "nope.json")]) == 2
+    assert "vectors file does not exist" in capsys.readouterr().err

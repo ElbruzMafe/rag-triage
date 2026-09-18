@@ -50,7 +50,7 @@ class Wellformed(HTMLParser):
 
 def test_text_report_lists_every_case_and_the_fix_order():
     text = render_text([result(), result(Verdict.OK)], chunks=16, judge="lexical", k=5)
-    assert "rag-triage  2 cases  |  16 chunks  |  judge lexical  |  k=5" in text
+    assert "rag-triage  2 cases  |  16 chunks  |  retriever bm25  |  judge lexical  |  k=5" in text
     assert text.index("ungrounded") < text.index("what to fix first")
 
 
