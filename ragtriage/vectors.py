@@ -9,7 +9,9 @@ from pathlib import Path
 from .models import Chunk, EvalCase, Hit
 
 
-def load_vectors(path: str | Path) -> tuple[dict[str, list[float]], dict[str, list[float]], str | None]:
+def load_vectors(
+    path: str | Path,
+) -> tuple[dict[str, list[float]], dict[str, list[float]], str | None]:
     """Read a vectors file: chunk vectors, query vectors, and the model that made them.
 
     The format is deliberately dumb - two mappings of key to list of floats - so any
