@@ -132,3 +132,47 @@ small per-model price table. The CLI prints the line only if the judge exposes a
 attribute, so the lexical judge stays free of an accounting concept it does not need and
 a third judge would get the reporting for nothing. Unknown model ids report calls and
 tokens but no dollar figure, rather than guessing a price.
+
+## A retriever protocol, and vectors that come from outside
+
+`retrieval_miss` used to mean "BM25 did not find it", which is a lexical baseline and
+not what anyone actually runs. The fix was two small pieces rather than one big one: a
+three-member `Retriever` protocol (`name`, `score_all`, `search`) that BM25 already
+satisfied, and a `VectorRetriever` behind it that ranks by cosine.
+
+What it deliberately does not do is call an embedding model. That would mean an API key
+or a torch download, and it would measure *my* choice of embedder rather than the user's.
+So vectors arrive as a JSON file of `{chunk id: vector}` and `{query text: vector}`, and
+`--embed-inputs` writes out exactly the texts that file has to cover. The user runs their
+own model over that list, which is a dozen lines against any embedding API, and the
+verdicts are then about the model they actually serve.
+
+The keys are the interesting design detail. Chunk ids encode the chunking parameters, so
+a vectors file built with a different `--max-chars` produces ids that do not line up.
+Rather than silently ranking the chunks it happens to have, the retriever refuses to
+start and says how many chunks are missing and why. Query vectors are keyed by the exact
+text, and gold answers are in the export as well as questions, because evidence location
+searches with the gold answer.
+
+## Prompt caching would not fire, so it is not there
+
+The plan was to add `cache_control` to the Claude judge, since the system prompt is
+identical on every call. Measuring first killed it: the system prompt is 286 characters,
+roughly 70 tokens, and the largest example chunk is another ~90. Even at the `--max-chars
+900` ceiling the cacheable prefix tops out near 300 tokens, against a documented minimum
+cacheable prefix of about 1024 - below that the API silently does not cache. Adding the
+parameter would have produced a line of code, a paragraph in the README, and no saving at
+all.
+
+The prompt is already laid out cache-first (fixed system, then the passage, then the
+claim) so this becomes true for free if chunks get big enough. What actually cuts calls
+at this size is the per-process memo, which is already there: the bundled example makes
+89 calls where the naive count is well over a hundred.
+
+## The HTML filter is CSS, not JavaScript
+
+Filtering the report by verdict wants to be a click handler. The tiles are labels for
+hidden radio buttons instead, with one generated rule per verdict hiding the cards that
+do not match. It is a few more lines than the JavaScript would have been, and it keeps
+the promise that matters: the report is one file that renders from a ticket attachment,
+an email, or a CI artifact viewer with scripts disabled.

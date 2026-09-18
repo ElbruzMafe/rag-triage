@@ -23,7 +23,7 @@ with it.
 Run against the sample docs in `examples/`:
 
 ```
-rag-triage  9 cases  |  16 chunks  |  judge lexical  |  k=5
+rag-triage  9 cases  |  16 chunks  |  retriever bm25  |  judge lexical  |  k=5
 
   case               verdict              support rank
   -----------------  -------------------  ------------
@@ -53,9 +53,9 @@ what to fix first
   1x no_answer -> no answer recorded for this case - run the system under test first
 ```
 
-The `support rank` column is the position the supporting chunk gets in a plain BM25
-ranking of the question. For a `retrieval_miss` that number is the actionable part: if
-it says `#9` and you are retrieving `k=5`, raising k fixes the case; if it says `-`, no
+The `support rank` column is the position the supporting chunk gets when the retriever
+ranks the question. For a `retrieval_miss` that number is the actionable part: if it
+says `#9` and you are retrieving `k=5`, raising k fixes the case; if it says `-`, no
 amount of k helps and the chunking or the embedding is the problem.
 
 ## Drilling into one case
@@ -103,7 +103,9 @@ groundedness check has already failed, so they cost nothing on healthy cases.
 
 `--html report.html` writes the same detail for every case as one self-contained file:
 counts per verdict at the top, then a collapsible card per case with the retrieved
-chunks, the supporting one highlighted, and the sentence breakdown.
+chunks, the supporting one highlighted, and the sentence breakdown. The verdict tiles
+are also filters - clicking one hides the other cases. No JavaScript, no external
+requests, so it survives being attached to a ticket or a CI run.
 
 ## The verdicts
 
@@ -124,6 +126,8 @@ at all.
 
 - Heading-aware markdown chunking, with paragraph packing and a hard-split fallback
 - Dependency-free BM25 retriever with a small English stemmer
+- A vector backend behind the same interface: feed it your own embeddings and the
+  verdicts describe your retriever, not a lexical stand-in
 - Two judges behind one interface: an offline token-overlap judge, and a Claude judge
   for eval sets whose wording differs from the corpus
 - Evidence location - finds which chunks back the gold answer, anywhere in the corpus
@@ -137,7 +141,8 @@ at all.
 ## Tech stack
 
 Python 3.10+, PyYAML, and the `anthropic` SDK for the optional Claude judge. Tests use
-pytest. There is no vector database and no embedding model - see DECISIONS.md.
+pytest. There is no vector database, and rag-triage calls no embedding model itself - it
+consumes vectors you supply. See DECISIONS.md.
 
 ## Running it
 
@@ -163,6 +168,49 @@ Every run with the Claude judge ends with a `judge usage` line: how many API cal
 made, how many of those were served from the in-process cache, the input and output
 tokens, and an estimated cost from the published per-token price for the model. The
 bundled nine-case example needs 89 judge calls, or 80 with `--no-claim-detail`.
+
+### Grading your own retriever
+
+By default the `retrieval_miss` verdicts describe BM25, which is probably not what you
+serve. To make them describe your embedding model, hand rag-triage the vectors. It never
+calls an embedding model itself - it only consumes what you give it.
+
+First ask what needs embedding. The answer depends on the chunking, so pass the same
+`--max-chars` and `--overlap` you will run with:
+
+```bash
+rag-triage --corpus docs/ --evalset eval.yaml --embed-inputs inputs.json
+# wrote 16 chunk texts and 18 query texts to inputs.json
+```
+
+`inputs.json` is `{"chunks": {id: text}, "queries": [text, ...]}`. Run your model over
+it and write the vectors back in the same shape:
+
+```json
+{
+  "model": "text-embedding-3-small",
+  "chunks":  {"api.md#0": [0.01, -0.02, ...]},
+  "queries": {"What is the API rate limit?": [0.03, ...]}
+}
+```
+
+```bash
+rag-triage --corpus docs/ --evalset eval.yaml --vectors vectors.json
+# rag-triage  9 cases  |  16 chunks  |  retriever vectors:text-embedding-3-small  |  ...
+```
+
+Queries are both the questions and the gold answers, because evidence location searches
+with the gold answer rather than the question. Chunk ids encode the chunking, so a
+vectors file built with different chunk settings is rejected with a count of what is
+missing instead of quietly ranking a subset.
+
+`examples/hash_vectors.py` is a stdlib hashing vectorizer for trying the flow without an
+API key. It has no semantic understanding and is not a serious retriever; it exists so
+you can see the wiring before writing the real embedder:
+
+```bash
+python examples/hash_vectors.py inputs.json vectors.json
+```
 
 Reports:
 
@@ -192,14 +240,15 @@ the evidence exists and whether it is retrievable.
 ragtriage/
   models.py        dataclasses shared by every stage
   corpus.py        document loading, chunking, eval set parsing
-  retriever.py     BM25 index and tokenizer
+  retriever.py     Retriever protocol, BM25 index and tokenizer
+  vectors.py       cosine retriever over vectors you supply
   judge.py         Judge protocol and the offline lexical judge
   claude_judge.py  Claude judge, same protocol, plus usage accounting
   claims.py        sentence splitting and per-sentence grounding
   triage.py        the decision tree that assigns a verdict
   report.py        text, markdown, HTML and JSON rendering
   cli.py           argparse entry point
-examples/          sample docs and an eval set covering every verdict
+examples/          sample docs, an eval set covering every verdict, hash_vectors.py
 tests/             pytest suite
 ```
 
@@ -211,14 +260,22 @@ tests/             pytest suite
   because it needs no key and runs in milliseconds.
 - The stemmer is a handful of suffix rules, not Porter. It gets plurals and `-ed`/`-ing`
   right and will mangle irregular words.
-- Retrieval is BM25 only, so `retrieval_miss` verdicts describe a lexical baseline, not
-  your embedding model. Feeding recorded `retrieved_ids` from your own pipeline is the
-  accurate path today; a pluggable retriever backend is the next piece of work.
-- Evidence location scans the top `--support-scan` BM25 candidates rather than the whole
-  corpus, so a gold answer sharing no vocabulary with its source chunk can be reported
+- The default retriever is BM25, so unless you pass `--vectors` or recorded
+  `retrieved_ids`, a `retrieval_miss` describes a lexical baseline rather than your
+  embedding model. The vector backend closes that, but it makes you produce the vectors
+  yourself - there is no `--embed-with` that calls a provider for you.
+- The vector retriever holds every vector in memory and scores them one at a time. That
+  is fine for the thousands of chunks an eval corpus has and wrong for a real index;
+  there is no ANN structure behind it.
+- Query vectors are looked up by exact text, so an eval set edited after the vectors were
+  built fails loudly on the changed case rather than re-embedding it.
+- Evidence location scans the top `--support-scan` candidates the retriever returns for
+  the gold answer, rather than the whole corpus, so a gold answer sharing no vocabulary with its source chunk can be reported
   as `missing_from_corpus`.
 - Sentence splitting is a regex with an abbreviation list. It handles decimals, version
   numbers and `e.g.`, and it will merge two sentences when the second starts with a
   lowercase word. Bulleted or tabular answers are treated as one sentence.
-- Judge cost is reported per run, not per case, and the Claude judge does not use prompt
-  caching yet even though the system prompt is identical on every call.
+- Judge cost is reported per run, not per case. Prompt caching is deliberately absent:
+  the system prompt plus a chunk is around 300 tokens, well under the ~1024-token minimum
+  cacheable prefix, so `cache_control` would have cost a line of code and saved nothing.
+  DECISIONS.md has the measurement.
