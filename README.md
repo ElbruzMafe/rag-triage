@@ -135,6 +135,8 @@ at all.
 - Works from recorded traces: put the chunk ids your production retriever returned in
   the eval set and rag-triage grades those instead of running its own search
 - `--explain <case-id>` for the full trace of a single case
+- `--compare` puts two retrievers side by side on the same cases, and names the ones
+  a retriever change fixes, breaks, or cannot help
 - Text, markdown, HTML and JSON reports; `--strict` exits non-zero for CI
 - Call, token and cost accounting for the Claude judge
 
@@ -212,6 +214,55 @@ you can see the wiring before writing the real embedder:
 python examples/hash_vectors.py inputs.json vectors.json
 ```
 
+### Comparing two retrievers
+
+Deciding whether a new embedding model is worth shipping means knowing which cases it
+fixes and which it breaks. `--compare` runs the same eval set through the BM25 baseline
+and your vectors, and prints the two verdicts side by side:
+
+```bash
+rag-triage --corpus docs/ --evalset eval.yaml --vectors vectors.json --compare
+```
+
+```
+rag-triage comparison  9 cases  |  16 chunks  |  judge lexical  |  k=5
+  A  bm25
+  B  vectors:hash-demo
+
+  case               A verdict            B verdict            A rank  B rank
+  -----------------  -------------------  -------------------  ------  ------
+  backup-retention   ungrounded           ungrounded           #1      #1
+  page-size          ok                   ok                   #1      #1
+  rate-limit         ok                   ok                   #1      #1
+  refund-window      generation_miss      generation_miss      #1      #1
+  scim-provisioning  missing_from_corpus  missing_from_corpus  -       -
+  webhook-retry      retrieval_miss       retrieval_miss       #1      #6
+
+changed
+  0 of 9 cases get a different verdict
+
+retrieval
+  A got the evidence to the model in 7 of 9 cases, B in 7
+  biggest rank moves: webhook-retry #1 -> #6
+```
+
+That is the hashing vectorizer, so the null result is the correct one: it has no
+semantic understanding, it is not meaningfully different from lexical matching on this
+corpus, and no verdict moves. What it does show is the rank column. On `webhook-retry`
+the supporting chunk sits at #1 for BM25 and #6 for the vectors, so that case is one k
+away from breaking even though today both retrievers call it the same thing. Rank moves
+without a verdict change are the headroom a case has left.
+
+A case marked `*` is one where the verdict actually changed. `--strict` exits 1 when B
+loses evidence that A got into the context, which makes the comparison usable as a CI
+gate on a retriever change. `--json` writes the same data; `--markdown` and `--html` are
+single-run reports and are rejected here.
+
+Evidence is located once per case, with A, and handed to both sides. Whether the gold
+answer is backed by the corpus at all is a fact about the corpus, so it must not change
+just because the retriever under test changed - otherwise a weak embedding reports an
+ingestion bug instead of its own recall problem. It also halves the judge calls.
+
 Reports:
 
 ```bash
@@ -246,6 +297,7 @@ ragtriage/
   claude_judge.py  Claude judge, same protocol, plus usage accounting
   claims.py        sentence splitting and per-sentence grounding
   triage.py        the decision tree that assigns a verdict
+  compare.py       two retrievers over one eval set, paired by case
   report.py        text, markdown, HTML and JSON rendering
   cli.py           argparse entry point
 examples/          sample docs, an eval set covering every verdict, hash_vectors.py

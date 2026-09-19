@@ -176,3 +176,35 @@ hidden radio buttons instead, with one generated rule per verdict hiding the car
 do not match. It is a few more lines than the JavaScript would have been, and it keeps
 the promise that matters: the report is one file that renders from a ticket attachment,
 an email, or a CI artifact viewer with scripts disabled.
+
+## A comparison locates the evidence once, not once per retriever
+
+`--compare` runs one eval set through two retrievers. The obvious implementation is to
+triage twice and pair the results up, and that is what I wrote first. It is wrong.
+
+Triage starts by asking whether the gold answer is supported anywhere in the corpus.
+That search runs through the retriever, because judging all N chunks is unaffordable -
+so the retriever picks the candidates the judge gets to see. Run it twice and each side
+answers the question from its own candidate pool. A retriever that ranks the supporting
+chunk below `--support-scan`, or gives it no score at all, never puts it in front of the
+judge and the case comes back `missing_from_corpus`.
+
+That verdict means "fix ingestion". It is a claim about the corpus, and in a two-sided
+comparison it was changing because the *retriever* changed. A weak embedding would tell
+you to go fix your document pipeline, when the actual finding is that the embedding
+cannot find a chunk that is sitting right there. I reproduced it on a two-chunk corpus
+where the supporting chunk states the gold verbatim: BM25 said `generation_miss`, a
+vector retriever pointed the other way said `missing_from_corpus`.
+
+So `compare()` locates the evidence once, with retriever A, and passes it to both sides.
+Each side still computes its own support rank from its own ranking of the question -
+that difference is the thing being measured. What the two sides no longer disagree about
+is what is in the corpus. Two consequences fell out: a comparison costs the same judge
+calls as a single run rather than double, and `support_differs` - a field that reported
+"the two retrievers located different evidence" - became structurally impossible and was
+deleted. The tests pin both: one asserts the verdict no longer flips to
+`missing_from_corpus`, one counts judge calls against a single-run baseline.
+
+The general shape: when two configurations are compared, anything that is a property of
+the *input* rather than the configuration has to be computed once and shared, or the
+comparison silently measures the wrong thing.
