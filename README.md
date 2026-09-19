@@ -137,6 +137,8 @@ at all.
 - `--explain <case-id>` for the full trace of a single case
 - `--compare` puts two retrievers side by side on the same cases, and names the ones
   a retriever change fixes, breaks, or cannot help
+- `--compare judge` does the same across two judges, so you can see which verdicts
+  depend on the grader rather than on the pipeline
 - Text, markdown, HTML and JSON reports; `--strict` exits non-zero for CI
 - Call, token and cost accounting for the Claude judge
 
@@ -170,6 +172,11 @@ Every run with the Claude judge ends with a `judge usage` line: how many API cal
 made, how many of those were served from the in-process cache, the input and output
 tokens, and an estimated cost from the published per-token price for the model. The
 bundled nine-case example needs 89 judge calls, or 80 with `--no-claim-detail`.
+
+`--judge` takes a short spec rather than a bare name: `lexical`, `claude`, or
+`lexical@0.8` for the lexical judge with its support threshold moved. The threshold form
+exists so two arms of a judge comparison can be the same judge calibrated differently -
+see below.
 
 ### Grading your own retriever
 
@@ -225,7 +232,7 @@ rag-triage --corpus docs/ --evalset eval.yaml --vectors vectors.json --compare
 ```
 
 ```
-rag-triage comparison  9 cases  |  16 chunks  |  judge lexical  |  k=5
+rag-triage retriever comparison  9 cases  |  16 chunks  |  judge lexical  |  k=5
   A  bm25
   B  vectors:hash-demo
 
@@ -262,6 +269,70 @@ Evidence is located once per case, with A, and handed to both sides. Whether the
 answer is backed by the corpus at all is a fact about the corpus, so it must not change
 just because the retriever under test changed - otherwise a weak embedding reports an
 ingestion bug instead of its own recall problem. It also halves the judge calls.
+
+### Comparing two judges
+
+Every verdict in this tool is downstream of a judge call, so the obvious question is how
+much of a verdict is the pipeline and how much is the grader. `--compare judge` holds the
+retriever still and runs two judges over the same cases:
+
+```bash
+rag-triage --corpus docs/ --evalset eval.yaml --compare judge --judge-b lexical@0.4
+```
+
+```
+rag-triage judge comparison  9 cases  |  16 chunks  |  retriever bm25  |  k=5
+  A  lexical
+  B  lexical@0.4
+
+  case               A verdict            B verdict            A support  B support
+  -----------------  -------------------  -------------------  ---------  ---------
+  downgrade-timing   ungrounded           generation_miss      1          3         *
+  incident-sla       ungrounded           generation_miss      1          1         *
+  backup-retention   ungrounded           ungrounded           1          1
+  page-size          ok                   ok                   1          1
+  rate-limit         ok                   ok                   1          1
+  refund-window      generation_miss      generation_miss      1          1
+  scim-provisioning  missing_from_corpus  missing_from_corpus  0          0
+  seat-counting      no_answer            no_answer            1          1
+  webhook-retry      retrieval_miss       retrieval_miss       1          1
+
+agreement
+  7 of 9 cases get the same verdict (78%)
+
+disagreements
+  ungrounded -> generation_miss  2
+
+reading it
+  the judges never disagree about whether a case passes, only about which stage to blame
+  for it - so the risk here is fixing the wrong half of the pipeline, not shipping a failure
+```
+
+Two cases move from `ungrounded` (tighten the prompt) to `generation_miss` (fix the
+model) purely because the judge got more lenient about what counts as supported. Nothing
+about the corpus, the retriever or the answers changed. Those two verdicts are the ones
+to read by hand before acting on them.
+
+The `support` columns are how many chunks each judge was willing to call evidence for the
+gold answer, which is the judge's own behaviour rather than the retriever's. A judge that
+finds nothing reports `missing_from_corpus`, which is why a strict enough judge starts
+blaming ingestion.
+
+The intended production pairing is `--judge lexical --judge-b claude`: run the free judge
+in CI, and periodically ask whether it agrees with the expensive one. `--strict` exits 1
+on a *masked failure* - a case A calls `ok` and B does not - which is the shape of "the
+cheap judge is reporting green on something that is red". Stage disagreements like the
+ones above are printed but do not trip the gate; the case is failing either way.
+
+`lexical@0.8` is the same lexical judge with its support threshold moved. Sweeping it is
+a cheap way to find out which verdicts are real and which are artefacts of a magic
+number - on the bundled example nothing moves between 0.5 and 0.75, so the 0.6 default is
+not sitting on a cliff.
+
+One honest cost: on this axis the two judges each locate their own evidence, because
+"does this chunk back the gold answer" is exactly the question being compared. A judge
+comparison therefore costs two runs' worth of judge calls, unlike a retriever comparison,
+which costs one. DECISIONS.md has the reasoning.
 
 Reports:
 
@@ -310,6 +381,15 @@ tests/             pytest suite
   paraphrase from a contradiction, so a wrong answer that reuses the corpus wording can
   be reported as `ok`. The Claude judge exists for this; the lexical one is the default
   because it needs no key and runs in milliseconds.
+- `--compare judge` between two lexical thresholds can never produce a masked failure on
+  its own. `ok` is decided by `equivalent`, which the support threshold does not touch,
+  so a threshold sweep moves cases between the failing verdicts and never across the
+  pass/fail line. Only a different kind of judge - `--judge-b claude` - exercises that
+  half of the comparison. The bundled example therefore shows stage shifts, not masked
+  failures.
+- A judge comparison costs two evidence scans per case where a retriever comparison
+  costs one, so `--compare judge --judge-b claude` on a large eval set is the most
+  expensive thing this tool does.
 - The stemmer is a handful of suffix rules, not Porter. It gets plurals and `-ed`/`-ing`
   right and will mangle irregular words.
 - The default retriever is BM25, so unless you pass `--vectors` or recorded
