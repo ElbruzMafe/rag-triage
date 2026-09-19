@@ -208,3 +208,54 @@ deleted. The tests pin both: one asserts the verdict no longer flips to
 The general shape: when two configurations are compared, anything that is a property of
 the *input* rather than the configuration has to be computed once and shared, or the
 comparison silently measures the wrong thing.
+
+## The sharing rule inverts when the judge is the axis
+
+Adding a judge comparison - same retriever, two graders - looked like it would reuse the
+comparison machinery unchanged. It nearly did, except for the rule above. Sharing the
+located evidence between the two sides is not a fact about comparisons; it is a fact
+about *which* thing is being compared.
+
+The evidence scan asks the judge "does this chunk back the gold answer". On the
+retriever axis that question is a constant: the judge is held still, so freezing the
+answer removes noise and halves the cost. On the judge axis it is the measurement.
+Freezing it with judge A would make B's `supports` call invisible on the one code path
+where it matters most, and two judges that disagree about what the corpus contains would
+be reported as agreeing.
+
+So `compare()` shares the evidence when `arm_a.judge is arm_b.judge` and not otherwise.
+That is a two-word condition carrying the whole distinction, so the tests pin it from
+both sides: forcing it to always share breaks the judge-axis tests, forcing it to never
+share breaks the retriever-axis ones.
+
+The cost is honest and stated in the output: a judge comparison runs two evidence scans
+per case, so it costs what two runs cost. There is no way around that - the second scan
+is the experiment.
+
+## A threshold is a judge
+
+`--judge-b` takes the same spec as `--judge`, and the spec allows `lexical@0.8` as well
+as `lexical` and `claude`. That is mostly there so the comparison has something to
+compare offline, but it turned out to be the more useful half.
+
+The lexical judge's support threshold was 0.6 because 0.6 worked. Comparing 0.6 against
+its neighbours says which verdicts actually depend on it: on the bundled example nothing
+moves between 0.5 and 0.75, two cases move at 0.4, and one moves at 0.8. A verdict that
+survives that sweep is a finding; one that does not is an artefact of a magic number.
+
+Only the support threshold is tunable, not the match threshold. `supports` is the method
+the decision tree leans on - evidence location, groundedness and the per-sentence check
+all route through it - while `equivalent` is anchored by the hard check on figures.
+One knob that means something beats two that have to be explained together.
+
+## What `--strict` means on each axis
+
+`--strict` has to answer "did B lose ground A held", and the two axes lose ground
+differently. On the retriever axis it is a regression: A got the evidence into the
+context and B did not. On the judge axis it is a masked failure: A calls the case `ok`
+and B does not, which is the shape of "the cheap judge I run in CI is reporting green on
+something that is red".
+
+Stage disagreements - both judges fail a case but name different stages - deliberately
+do not trip it. They are worth reading and they are printed, but they are not a broken
+gate; the pipeline is failing either way and the argument is about where to look.
