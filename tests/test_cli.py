@@ -214,7 +214,7 @@ def test_compare_with_html_exits_with_two(vectors_file, tmp_path, capsys):
 def test_compare_prints_side_by_side_table(vectors_file, capsys):
     assert main(ARGS + ["--compare", "--vectors", str(vectors_file)]) == 0
     out = capsys.readouterr().out
-    assert "rag-triage comparison" in out
+    assert "rag-triage retriever comparison" in out
     assert "bm25" in out
     assert "vectors:hash-demo" in out
 
@@ -226,9 +226,10 @@ def test_compare_writes_json_report(vectors_file, tmp_path, capsys):
     capsys.readouterr()
 
     data = json.loads(json_path.read_text(encoding="utf-8"))
-    assert set(data.keys()) == {"retrievers", "summary", "cases"}
-    assert data["retrievers"] == {"a": "bm25", "b": "vectors:hash-demo"}
-    assert set(data["summary"].keys()) == {"changed", "unchanged", "a_retrieved", "b_retrieved"}
+    assert set(data.keys()) == {"axis", "arms", "evidence_shared", "summary", "cases"}
+    assert data["axis"] == "retriever"
+    assert data["arms"] == {"a": "bm25", "b": "vectors:hash-demo"}
+    assert data["evidence_shared"] is True
     assert len(data["cases"]) == 9
 
 
@@ -236,3 +237,91 @@ def test_compare_strict_passes_when_no_regressions(vectors_file, capsys):
     assert main(ARGS + ["--compare", "--vectors", str(vectors_file), "--strict"]) == 0
     capsys.readouterr()
 
+
+
+def test_compare_judge_needs_a_second_judge(capsys):
+    assert main(ARGS + ["--compare", "judge"]) == 2
+    assert "--judge-b" in capsys.readouterr().err
+
+
+def test_judge_b_without_the_judge_axis_exits_with_two(capsys):
+    assert main(ARGS + ["--judge-b", "lexical@0.8"]) == 2
+    assert "only does something with --compare judge" in capsys.readouterr().err
+
+
+def test_comparing_a_judge_with_itself_exits_with_two(capsys):
+    assert main(ARGS + ["--compare", "judge", "--judge-b", "lexical"]) == 2
+    assert "measures nothing" in capsys.readouterr().err
+
+
+def test_a_bad_judge_spec_exits_with_two(capsys):
+    assert main(ARGS + ["--judge", "lexical@nope"]) == 2
+    assert "not a number in judge spec" in capsys.readouterr().err
+
+
+def test_compare_judge_prints_the_support_columns(capsys):
+    assert main(ARGS + ["--compare", "judge", "--judge-b", "lexical@0.85"]) == 0
+    out = capsys.readouterr().out
+    assert "rag-triage judge comparison" in out
+    assert "retriever bm25" in out
+    assert "A support" in out and "B support" in out
+    assert "agreement" in out
+
+
+def test_compare_judge_writes_json_with_per_arm_evidence(tmp_path, capsys):
+    json_path = tmp_path / "judges.json"
+    args = ARGS + ["--compare", "judge", "--judge-b", "lexical@0.85", "--json", str(json_path)]
+    assert main(args) == 0
+    capsys.readouterr()
+
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    assert data["axis"] == "judge"
+    assert data["arms"] == {"a": "lexical", "b": "lexical@0.85"}
+    # Each judge decides for itself what backs the gold answer, so the evidence is not shared.
+    assert data["evidence_shared"] is False
+    assert all("evidence_chunks" in case["a"] for case in data["cases"])
+
+
+@pytest.fixture
+def paraphrased_set(tmp_path):
+    """One case whose gold answer is a paraphrase: supported at 0.6, not at 0.9."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "billing.md").write_text(
+        "# Refunds\n\nRefunds are returned to the original payment card within "
+        "5 business days.\n",
+        encoding="utf-8",
+    )
+    gold = "A refund lands on the original payment card within 5 business days of approval."
+    evalset = tmp_path / "eval.yaml"
+    evalset.write_text(
+        "cases:\n"
+        "  - id: refund-window\n"
+        "    question: how long does a refund take\n"
+        f"    gold: {gold}\n"
+        f"    answer: {gold}\n",
+        encoding="utf-8",
+    )
+    return ["--corpus", str(corpus), "--evalset", str(evalset)]
+
+
+def test_compare_judge_strict_fails_on_a_masked_failure(paraphrased_set, capsys):
+    # The stricter judge stops recognising the evidence, so a case A calls ok turns red.
+    args = paraphrased_set + ["--compare", "judge", "--judge-b", "lexical@0.9"]
+    assert main(args + ["--strict"]) == 1
+    out = capsys.readouterr().out
+    assert "masked failures" in out
+    assert "the cheaper judge is not reporting" in out
+
+
+def test_compare_judge_strict_passes_when_the_judges_agree(paraphrased_set, capsys):
+    args = paraphrased_set + ["--compare", "judge", "--judge-b", "lexical@0.7", "--strict"]
+    assert main(args) == 0
+    assert "the two judges agree on every case" in capsys.readouterr().out
+
+
+def test_compare_judge_uses_the_vector_retriever_when_given_one(vectors_file, capsys):
+    args = ARGS + ["--compare", "judge", "--judge-b", "lexical@0.85", "--vectors",
+                   str(vectors_file)]
+    assert main(args) == 0
+    assert "retriever vectors:hash-demo" in capsys.readouterr().out

@@ -3,12 +3,13 @@ import json
 import pytest
 
 from ragtriage.compare import (
+    Arm,
     CaseComparison,
     compare,
     retrieved_evidence,
     summarize_comparison,
 )
-from ragtriage.judge import LexicalJudge
+from ragtriage.judge import LexicalJudge, build_judge
 from ragtriage.models import CaseResult, Chunk, EvalCase, Hit, Verdict
 from ragtriage.report import comparison_to_dict, render_comparison
 from ragtriage.retriever import BM25Retriever
@@ -23,6 +24,31 @@ CHUNKS = [
     Chunk("ops.md#0", "ops.md", 0, "Backups",
           "Database backups run daily at 02:00 UTC and are retained for 30 days."),
 ]
+
+
+class CountingJudge:
+    """A judge that counts its supports() calls, which is what evidence location spends."""
+
+    def __init__(self, inner=None):
+        self.inner = inner or LexicalJudge()
+        self.name = f"counting:{self.inner.name}"
+        self.supports_calls = 0
+
+    def supports(self, claim, passage):
+        self.supports_calls += 1
+        return self.inner.supports(claim, passage)
+
+    def equivalent(self, gold, actual):
+        return self.inner.equivalent(gold, actual)
+
+    def grounded(self, answer, passages):
+        return self.inner.grounded(answer, passages)
+
+
+def retriever_arms(retriever_a, retriever_b, judge):
+    """Two arms that differ only in the retriever: the same judge object on both sides,
+    which is what tells compare() the evidence may be located once and shared."""
+    return Arm(retriever_a.name, retriever_a, judge), Arm(retriever_b.name, retriever_b, judge)
 
 
 @pytest.fixture
@@ -54,7 +80,7 @@ def test_identical_retrievers_produce_no_changes(judge):
         ),
     ]
 
-    comparisons = compare(cases, retriever_a, retriever_b, judge)
+    comparisons = compare(cases, *retriever_arms(retriever_a, retriever_b, judge))
     summary = summarize_comparison(comparisons)
 
     assert summary.changed == 0
@@ -96,7 +122,7 @@ def test_regression_guard_evidence_located_with_baseline_not_candidate(judge):
         answer="Refunds are returned to the original payment card within 5 business days.",
     )
 
-    comparisons = compare([case], retriever_a, retriever_b, judge)
+    comparisons = compare([case], *retriever_arms(retriever_a, retriever_b, judge))
     comp = comparisons[0]
 
     # Whether the evidence exists in the corpus is a property of the corpus,
@@ -130,30 +156,13 @@ def test_both_sides_report_same_evidence_chunks(judge):
         EvalCase(id="scim", question=q2, gold=g2, answer="yes"),
     ]
 
-    comparisons = compare(cases, retriever_a, retriever_b, judge)
+    comparisons = compare(cases, *retriever_arms(retriever_a, retriever_b, judge))
     assert len(comparisons) == 2
     for c in comparisons:
         assert {h.chunk.id for h in c.a.support} == {h.chunk.id for h in c.b.support}
 
 
 def test_compare_calls_evidence_location_once_per_case():
-    class CountingJudge:
-        name = "counting"
-
-        def __init__(self):
-            self.inner = LexicalJudge()
-            self.supports_calls = 0
-
-        def supports(self, gold, passage):
-            self.supports_calls += 1
-            return self.inner.supports(gold, passage)
-
-        def equivalent(self, gold, answer):
-            return self.inner.equivalent(gold, answer)
-
-        def grounded(self, answer, passages):
-            return self.inner.grounded(answer, passages)
-
     retriever_a = BM25Retriever(CHUNKS)
     retriever_b = BM25Retriever(CHUNKS)
     cases = [
@@ -172,7 +181,7 @@ def test_compare_calls_evidence_location_once_per_case():
     ]
 
     judge_compare = CountingJudge()
-    compare(cases, retriever_a, retriever_b, judge_compare)
+    compare(cases, *retriever_arms(retriever_a, retriever_b, judge_compare))
 
     judge_single = CountingJudge()
     triage_all(cases, retriever_a, judge_single)
@@ -226,7 +235,9 @@ def test_gains_and_regressions_direction(judge):
     retriever_b = VectorRetriever(chunks, chunk_vectors, query_vectors, model="test")
     case = EvalCase(id="refund-case", question=question, gold=gold, answer="5 business days")
 
-    comparisons = compare([case], retriever_a, retriever_b, judge, config=TriageConfig(k=1))
+    comparisons = compare(
+        [case], *retriever_arms(retriever_a, retriever_b, judge), config=TriageConfig(k=1)
+    )
     summary = summarize_comparison(comparisons)
 
     assert len(summary.regressions) == 1
@@ -264,11 +275,12 @@ def test_render_comparison_output():
     out = render_comparison(
         comparisons,
         summary,
+        axis="retriever",
         chunks=10,
-        judge="lexical",
         k=3,
         name_a="bm25",
         name_b="vectors:custom",
+        fixed="lexical",
     )
 
     assert "bm25" in out
@@ -296,25 +308,35 @@ def test_comparison_to_dict_round_trip():
     comparisons = [comp]
     summary = summarize_comparison(comparisons)
 
-    data = comparison_to_dict(comparisons, summary, name_a="bm25", name_b="vectors:model")
+    data = comparison_to_dict(
+        comparisons, summary, axis="retriever", name_a="bm25", name_b="vectors:model"
+    )
     roundtripped = json.loads(json.dumps(data))
     assert roundtripped == data
 
-    assert data["retrievers"] == {"a": "bm25", "b": "vectors:model"}
-    assert data["summary"] == {
-        "changed": 1,
-        "unchanged": 0,
-        "a_retrieved": 1,
-        "b_retrieved": 0,
-    }
+    assert data["axis"] == "retriever"
+    assert data["arms"] == {"a": "bm25", "b": "vectors:model"}
+    assert data["evidence_shared"] is True
+    assert data["summary"]["changed"] == 1
+    assert data["summary"]["unchanged"] == 0
+    assert data["summary"]["a_retrieved"] == 1
+    assert data["summary"]["b_retrieved"] == 0
+    assert data["summary"]["regressions"] == ["case-1"]
+    assert data["summary"]["shifts"] == [{"from": "ok", "to": "retrieval_miss", "count": 1}]
+
     assert len(data["cases"]) == 1
     case_data = data["cases"][0]
     assert case_data["id"] == "case-1"
-    assert case_data["evidence_chunks"] == ["doc.md#0"]
-    assert "evidence_chunks" not in case_data["a"]
-    assert "evidence_chunks" not in case_data["b"]
-    assert case_data["a"] == {"verdict": "ok", "support_rank": 1}
-    assert case_data["b"] == {"verdict": "retrieval_miss", "support_rank": 4}
+    assert case_data["a"] == {
+        "verdict": "ok",
+        "support_rank": 1,
+        "evidence_chunks": ["doc.md#0"],
+    }
+    assert case_data["b"] == {
+        "verdict": "retrieval_miss",
+        "support_rank": 4,
+        "evidence_chunks": ["doc.md#0"],
+    }
     assert case_data["verdict_changed"] is True
     assert case_data["rank_delta"] == 3
 
@@ -329,3 +351,185 @@ def test_retrieved_evidence_verdicts():
     for verdict in (Verdict.MISSING_FROM_CORPUS, Verdict.RETRIEVAL_MISS):
         res = CaseResult(case, verdict, [], [], best_support_rank=None)
         assert retrieved_evidence(res) is False
+
+
+# --- the judge axis -------------------------------------------------------
+
+PARAPHRASE = [
+    Chunk("billing.md#0", "billing.md", 0, "Refunds",
+          "Refunds are returned to the original payment card within 5 business days."),
+]
+PARAPHRASE_CASE = EvalCase(
+    id="refund-window",
+    question="how long does a refund take",
+    gold="A refund lands on the original payment card within 5 business days of approval.",
+    answer="A refund lands on the original payment card within 5 business days of approval.",
+)
+
+
+def judge_arms(retriever, judge_a, judge_b):
+    return Arm(judge_a.name, retriever, judge_a), Arm(judge_b.name, retriever, judge_b)
+
+
+def test_the_judge_axis_lets_each_arm_locate_its_own_evidence():
+    retriever = BM25Retriever(PARAPHRASE)
+    lenient = build_judge("lexical@0.6")
+    strict = build_judge("lexical@0.9")
+
+    comp = compare([PARAPHRASE_CASE], *judge_arms(retriever, lenient, strict))[0]
+
+    # Sharing evidence is right when the retriever moves and wrong when the judge does:
+    # "does this chunk back the gold answer" is the judge's own question.
+    assert comp.evidence_shared is False
+    assert [hit.chunk.id for hit in comp.a.support] == ["billing.md#0"]
+    assert comp.b.support == []
+    assert comp.a.verdict is Verdict.OK
+    assert comp.b.verdict is Verdict.MISSING_FROM_CORPUS
+
+
+def test_the_retriever_axis_still_shares_its_evidence(judge):
+    retriever_a = BM25Retriever(CHUNKS)
+    retriever_b = BM25Retriever(CHUNKS)
+    case = EvalCase(
+        id="rate-limit",
+        question="what is the API rate limit",
+        gold="The API allows 600 requests per minute per token.",
+        answer="600 requests per minute per token.",
+    )
+
+    comp = compare([case], *retriever_arms(retriever_a, retriever_b, judge))[0]
+    assert comp.evidence_shared is True
+
+
+def test_the_judge_axis_pays_for_two_evidence_scans_on_purpose():
+    retriever = BM25Retriever(CHUNKS)
+    cases = [
+        EvalCase(
+            id="rate-limit",
+            question="what is the API rate limit",
+            gold="The API allows 600 requests per minute per token.",
+            answer="600 requests per minute per token.",
+        ),
+        EvalCase(
+            id="backups",
+            question="how often do backups run",
+            gold="Database backups run daily at 02:00 UTC and are retained for 30 days.",
+            answer="Database backups run daily at 02:00 UTC and are retained for 30 days.",
+        ),
+    ]
+
+    shared = CountingJudge()
+    compare(cases, *judge_arms(retriever, shared, shared))
+
+    left, right = CountingJudge(), CountingJudge()
+    compare(cases, *judge_arms(retriever, left, right))
+
+    # Same judge object on both arms: one scan. Two objects: one scan each, and the
+    # second one is the whole point rather than waste.
+    assert left.supports_calls == shared.supports_calls
+    assert right.supports_calls == shared.supports_calls
+    assert shared.supports_calls > 0
+
+
+def _pair(case_id, verdict_a, verdict_b):
+    case = EvalCase(id=case_id, question="q", gold="g")
+    return CaseComparison(
+        case_id=case_id,
+        a=CaseResult(case, verdict_a, [], [], best_support_rank=1),
+        b=CaseResult(case, verdict_b, [], [], best_support_rank=1),
+        evidence_shared=False,
+    )
+
+
+def test_masked_failures_and_false_alarms_point_opposite_ways():
+    summary = summarize_comparison(
+        [
+            _pair("masked", Verdict.OK, Verdict.UNGROUNDED),
+            _pair("alarm", Verdict.GENERATION_MISS, Verdict.OK),
+            _pair("agreed", Verdict.OK, Verdict.OK),
+            _pair("both-fail", Verdict.UNGROUNDED, Verdict.RETRIEVAL_MISS),
+        ]
+    )
+
+    assert [c.case_id for c in summary.masked] == ["masked"]
+    assert [c.case_id for c in summary.false_alarms] == ["alarm"]
+
+
+def test_shifts_count_verdict_moves_commonest_first():
+    summary = summarize_comparison(
+        [
+            _pair("one", Verdict.UNGROUNDED, Verdict.GENERATION_MISS),
+            _pair("two", Verdict.UNGROUNDED, Verdict.GENERATION_MISS),
+            _pair("three", Verdict.RETRIEVAL_MISS, Verdict.MISSING_FROM_CORPUS),
+            _pair("same", Verdict.OK, Verdict.OK),
+        ]
+    )
+
+    assert summary.shifts == [
+        ("ungrounded", "generation_miss", 2),
+        ("retrieval_miss", "missing_from_corpus", 1),
+    ]
+
+
+def test_agreement_is_the_share_of_unchanged_verdicts():
+    summary = summarize_comparison(
+        [
+            _pair("a", Verdict.OK, Verdict.OK),
+            _pair("b", Verdict.OK, Verdict.OK),
+            _pair("c", Verdict.OK, Verdict.OK),
+            _pair("d", Verdict.OK, Verdict.UNGROUNDED),
+        ]
+    )
+    assert summary.agreement == 0.75
+    assert summarize_comparison([]).agreement == 0.0
+
+
+def test_render_judge_comparison_counts_evidence_instead_of_ranks():
+    case = EvalCase(id="refund-window", question="q", gold="g", answer="a")
+    chunk = Chunk("billing.md#0", "billing.md", 0, "Refunds", "text")
+    hit = Hit(chunk=chunk, score=1.0, rank=1)
+    comp = CaseComparison(
+        case_id="refund-window",
+        a=CaseResult(case, Verdict.OK, [hit], [hit], best_support_rank=1),
+        b=CaseResult(case, Verdict.MISSING_FROM_CORPUS, [], [hit], best_support_rank=None),
+        evidence_shared=False,
+    )
+    summary = summarize_comparison([comp])
+
+    out = render_comparison(
+        [comp],
+        summary,
+        axis="judge",
+        chunks=1,
+        k=5,
+        name_a="lexical",
+        name_b="lexical@0.9",
+        fixed="bm25",
+    )
+
+    assert "rag-triage judge comparison" in out
+    assert "retriever bm25" in out
+    assert "A support" in out and "B rank" not in out
+    assert "masked failures" in out
+    assert "ok -> missing_from_corpus" in out
+    assert out.splitlines()[-1].strip().startswith("each judge located its own evidence")
+
+
+def test_judge_advice_names_a_stage_only_disagreement():
+    comps = [
+        _pair("incident-sla", Verdict.UNGROUNDED, Verdict.GENERATION_MISS),
+        _pair("rate-limit", Verdict.OK, Verdict.OK),
+    ]
+    out = render_comparison(
+        comps,
+        summarize_comparison(comps),
+        axis="judge",
+        chunks=4,
+        k=5,
+        name_a="lexical",
+        name_b="lexical@0.4",
+        fixed="bm25",
+    )
+    # Neither judge calls a passing case failing, so the risk is a misdirected fix.
+    assert "masked failures" not in out
+    assert "which stage to blame" in out
