@@ -1,6 +1,8 @@
-import sys
 import json
+import sys
 from pathlib import Path
+
+import pytest
 
 from ragtriage.cli import main
 
@@ -158,3 +160,79 @@ def test_missing_query_vector_reports_the_text(tmp_path, capsys):
 def test_missing_vectors_file_is_an_error(capsys, tmp_path):
     assert main(ARGS + ["--vectors", str(tmp_path / "nope.json")]) == 2
     assert "vectors file does not exist" in capsys.readouterr().err
+
+
+@pytest.fixture
+def vectors_file(tmp_path, capsys):
+    inputs_path = tmp_path / "inputs.json"
+    main(ARGS + ["--embed-inputs", str(inputs_path)])
+    capsys.readouterr()
+    payload = json.loads(inputs_path.read_text())
+
+    if str(EXAMPLES) not in sys.path:
+        sys.path.insert(0, str(EXAMPLES))
+    from hash_vectors import embed
+
+    vectors_path = tmp_path / "vectors.json"
+    vectors_path.write_text(
+        json.dumps(
+            {
+                "model": "hash-demo",
+                "chunks": {cid: embed(text) for cid, text in payload["chunks"].items()},
+                "queries": {text: embed(text) for text in payload["queries"]},
+            }
+        )
+    )
+    return vectors_path
+
+
+def test_compare_without_vectors_exits_with_two(capsys):
+    assert main(ARGS + ["--compare"]) == 2
+    assert "--vectors" in capsys.readouterr().err
+
+
+def test_compare_with_explain_exits_with_two(vectors_file, capsys):
+    args = ARGS + ["--compare", "--vectors", str(vectors_file), "--explain", "rate-limit"]
+    assert main(args) == 2
+    assert "--explain" in capsys.readouterr().err
+
+
+def test_compare_with_markdown_exits_with_two(vectors_file, tmp_path, capsys):
+    out = ["--markdown", str(tmp_path / "out.md")]
+    args = ARGS + ["--compare", "--vectors", str(vectors_file)] + out
+    assert main(args) == 2
+    assert "--compare writes text and --json only" in capsys.readouterr().err
+
+
+def test_compare_with_html_exits_with_two(vectors_file, tmp_path, capsys):
+    out = ["--html", str(tmp_path / "out.html")]
+    args = ARGS + ["--compare", "--vectors", str(vectors_file)] + out
+    assert main(args) == 2
+    assert "--compare writes text and --json only" in capsys.readouterr().err
+
+
+def test_compare_prints_side_by_side_table(vectors_file, capsys):
+    assert main(ARGS + ["--compare", "--vectors", str(vectors_file)]) == 0
+    out = capsys.readouterr().out
+    assert "rag-triage comparison" in out
+    assert "bm25" in out
+    assert "vectors:hash-demo" in out
+
+
+def test_compare_writes_json_report(vectors_file, tmp_path, capsys):
+    json_path = tmp_path / "comparison.json"
+    args = ARGS + ["--compare", "--vectors", str(vectors_file), "--json", str(json_path)]
+    assert main(args) == 0
+    capsys.readouterr()
+
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    assert set(data.keys()) == {"retrievers", "summary", "cases"}
+    assert data["retrievers"] == {"a": "bm25", "b": "vectors:hash-demo"}
+    assert set(data["summary"].keys()) == {"changed", "unchanged", "a_retrieved", "b_retrieved"}
+    assert len(data["cases"]) == 9
+
+
+def test_compare_strict_passes_when_no_regressions(vectors_file, capsys):
+    assert main(ARGS + ["--compare", "--vectors", str(vectors_file), "--strict"]) == 0
+    capsys.readouterr()
+
