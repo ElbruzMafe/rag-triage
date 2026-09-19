@@ -512,7 +512,7 @@ def test_render_judge_comparison_counts_evidence_instead_of_ranks():
     assert "A support" in out and "B rank" not in out
     assert "masked failures" in out
     assert "ok -> missing_from_corpus" in out
-    assert out.splitlines()[-1].strip().startswith("each judge located its own evidence")
+    assert "each judge located its own evidence" in out
 
 
 def test_judge_advice_names_a_stage_only_disagreement():

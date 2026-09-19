@@ -432,17 +432,16 @@ def _judge_advice(summary: ComparisonSummary, comparisons: list[CaseComparison])
             "the one to run"
         )
     else:
-        lines.append(
-            "  the judges never disagree about whether a case passes, only about which stage "
-            "to blame for it - so the risk here is fixing the wrong half of the pipeline, "
-            "not shipping a failure"
-        )
+        lines += [
+            "  no case changes sides - the judges only disagree about which stage to blame,",
+            "  so the risk here is fixing the wrong half of the pipeline, not shipping a failure",
+        ]
 
     if any(not c.evidence_shared for c in comparisons):
-        lines.append(
-            "  each judge located its own evidence, so a missing_from_corpus only one side "
-            "reports is the two judges disagreeing about the corpus, not the corpus changing"
-        )
+        lines += [
+            "  each judge located its own evidence, so a missing_from_corpus only one side",
+            "  reports is the judges disagreeing about the corpus, not the corpus changing",
+        ]
 
     if summary.changed and summary.changed != len(comparisons):
         lines.append(

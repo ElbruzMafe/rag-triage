@@ -304,8 +304,11 @@ disagreements
   ungrounded -> generation_miss  2
 
 reading it
-  the judges never disagree about whether a case passes, only about which stage to blame
-  for it - so the risk here is fixing the wrong half of the pipeline, not shipping a failure
+  no case changes sides - the judges only disagree about which stage to blame,
+  so the risk here is fixing the wrong half of the pipeline, not shipping a failure
+  each judge located its own evidence, so a missing_from_corpus only one side
+  reports is the judges disagreeing about the corpus, not the corpus changing
+  7 cases land on the same verdict either way - those verdicts do not depend on which judge you run
 ```
 
 Two cases move from `ungrounded` (tighten the prompt) to `generation_miss` (fix the
