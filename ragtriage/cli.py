@@ -7,9 +7,9 @@ import json
 import sys
 from pathlib import Path
 
-from .compare import compare, summarize_comparison
+from .compare import Arm, compare, summarize_comparison
 from .corpus import load_corpus, load_evalset
-from .judge import LexicalJudge
+from .judge import build_judge
 from .models import Verdict
 from .report import (
     comparison_to_dict,
@@ -33,8 +33,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--corpus", required=True, help="directory of .md/.txt documents")
     parser.add_argument("--evalset", required=True, help="YAML file of eval cases")
     parser.add_argument("-k", type=int, default=5, help="top-k the system under test retrieves")
-    parser.add_argument("--judge", choices=("lexical", "claude"), default="lexical")
-    parser.add_argument("--model", default=None, help="model id for --judge claude")
+    parser.add_argument(
+        "--judge",
+        default="lexical",
+        metavar="SPEC",
+        help="lexical, claude, or lexical@0.8 to move the support threshold",
+    )
+    parser.add_argument(
+        "--judge-b",
+        dest="judge_b",
+        metavar="SPEC",
+        help="second judge for --compare judge, same spec form as --judge",
+    )
+    parser.add_argument("--model", default=None, help="model id for the claude judge")
     parser.add_argument("--max-chars", type=int, default=900, help="chunk size in characters")
     parser.add_argument("--overlap", type=int, default=120, help="chunk overlap in characters")
     parser.add_argument(
@@ -56,8 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--compare",
-        action="store_true",
-        help="run the BM25 baseline and the --vectors retriever side by side",
+        nargs="?",
+        const="retriever",
+        choices=("retriever", "judge"),
+        metavar="AXIS",
+        help="compare two retrievers (needs --vectors) or two judges (needs --judge-b); "
+        "defaults to retriever",
     )
     parser.add_argument(
         "--explain",
@@ -75,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="exit 1 if any case is not ok, or with --compare if B loses evidence A found",
+        help="exit 1 if any case is not ok; with --compare, if B loses ground A held",
     )
     return parser
 
@@ -111,14 +126,34 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.compare == "retriever" and not args.vectors:
+        print(
+            "rag-triage: --compare retriever needs --vectors: "
+            "it compares the bm25 baseline against a vector retriever",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.compare == "judge" and not args.judge_b:
+        print(
+            "rag-triage: --compare judge needs --judge-b, the second judge to grade with",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.judge_b and args.compare != "judge":
+        print("rag-triage: --judge-b only does something with --compare judge", file=sys.stderr)
+        return 2
+
+    if args.compare == "judge" and args.judge_b == args.judge:
+        print(
+            f"rag-triage: --judge and --judge-b are both {args.judge!r}; "
+            "comparing a judge with itself measures nothing",
+            file=sys.stderr,
+        )
+        return 2
+
     if args.compare:
-        if not args.vectors:
-            print(
-                "rag-triage: --compare needs --vectors: "
-                "it compares the bm25 baseline against a vector retriever",
-                file=sys.stderr,
-            )
-            return 2
         if args.explain:
             print("rag-triage: --compare and --explain cannot be used together", file=sys.stderr)
             return 2
@@ -132,12 +167,19 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
 
-    if args.judge == "claude":
-        from .claude_judge import ClaudeJudge
-
-        judge = ClaudeJudge(model=args.model) if args.model else ClaudeJudge()
-    else:
-        judge = LexicalJudge()
+    try:
+        judge = build_judge(args.judge, args.model)
+        judge_b = build_judge(args.judge_b, args.model) if args.judge_b else None
+    except ValueError as exc:
+        print(f"rag-triage: {exc}", file=sys.stderr)
+        return 2
+    except ImportError:
+        print(
+            "rag-triage: the claude judge needs the anthropic SDK: "
+            'pip install "rag-triage[claude]"',
+            file=sys.stderr,
+        )
+        return 2
 
     config = TriageConfig(
         k=args.k, support_scan=args.support_scan, claim_detail=not args.no_claim_detail
@@ -145,14 +187,26 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.compare:
         try:
-            retriever_a = BM25Retriever(chunks)
-            retriever_b = _build_retriever(chunks, args.vectors)
+            if args.compare == "judge":
+                # One retriever instance for both arms: the ranking is the constant here.
+                retriever = _build_retriever(chunks, args.vectors)
+                arm_a = Arm(judge.name, retriever, judge)
+                arm_b = Arm(judge_b.name, retriever, judge_b)
+                fixed = retriever.name
+            else:
+                # One judge instance for both arms, which is what lets compare() locate
+                # the evidence once and hand the same answer to each retriever.
+                baseline = BM25Retriever(chunks)
+                candidate = _build_retriever(chunks, args.vectors)
+                arm_a = Arm(baseline.name, baseline, judge)
+                arm_b = Arm(candidate.name, candidate, judge)
+                fixed = judge.name
         except (FileNotFoundError, ValueError, OSError) as exc:
             print(f"rag-triage: {exc}", file=sys.stderr)
             return 2
 
         try:
-            comparisons = compare(cases, retriever_a, retriever_b, judge, config)
+            comparisons = compare(cases, arm_a, arm_b, config)
         except (ValueError, LookupError) as exc:
             print(f"rag-triage: {exc}", file=sys.stderr)
             return 2
@@ -162,24 +216,23 @@ def main(argv: list[str] | None = None) -> int:
             render_comparison(
                 comparisons,
                 summary,
+                axis=args.compare,
                 chunks=len(chunks),
-                judge=judge.name,
                 k=args.k,
-                name_a=retriever_a.name,
-                name_b=retriever_b.name,
+                name_a=arm_a.label,
+                name_b=arm_b.label,
+                fixed=fixed,
             )
         )
-
-        usage = getattr(judge, "usage", None)
-        if usage is not None and usage.calls:
-            print(f"\njudge usage\n  {usage.summary()}")
+        _print_judge_usage(judge, judge_b)
 
         if args.json_out:
             payload = comparison_to_dict(
                 comparisons,
                 summary,
-                name_a=retriever_a.name,
-                name_b=retriever_b.name,
+                axis=args.compare,
+                name_a=arm_a.label,
+                name_b=arm_b.label,
             )
             try:
                 Path(args.json_out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -187,7 +240,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"rag-triage: could not write report: {exc}", file=sys.stderr)
                 return 2
 
-        return 1 if (args.strict and summary.regressions) else 0
+        losses = summary.masked if args.compare == "judge" else summary.regressions
+        return 1 if (args.strict and losses) else 0
 
     # --explain is a drill-down, so only the case being explained is worth triaging.
     if args.explain:
@@ -218,9 +272,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-    usage = getattr(judge, "usage", None)
-    if usage is not None and usage.calls:
-        print(f"\njudge usage\n  {usage.summary()}")
+    _print_judge_usage(judge)
 
     try:
         if args.json_out:
@@ -244,6 +296,23 @@ def main(argv: list[str] | None = None) -> int:
 
     failed = any(result.verdict is not Verdict.OK for result in results)
     return 1 if (args.strict and failed) else 0
+
+
+def _print_judge_usage(*judges) -> None:
+    """Judge calls are the cost centre, so any run that spent some says how many."""
+    spent = []
+    for judge in judges:
+        usage = getattr(judge, "usage", None)
+        if usage is None or not usage.calls or any(judge is other for other, _ in spent):
+            continue
+        spent.append((judge, usage))
+    if not spent:
+        return
+    lines = ["", "judge usage"]
+    for judge, usage in spent:
+        prefix = f"{judge.name}  " if len(spent) > 1 else ""
+        lines.append(f"  {prefix}{usage.summary()}")
+    print("\n".join(lines))
 
 
 def _build_retriever(chunks, vectors_path):

@@ -257,59 +257,117 @@ def render_comparison(
     comparisons: list[CaseComparison],
     summary: ComparisonSummary,
     *,
+    axis: str,
     chunks: int,
-    judge: str,
     k: int,
     name_a: str,
     name_b: str,
+    fixed: str,
 ) -> str:
-    """Two retrievers over the same eval set, verdict and support rank side by side."""
+    """Two arms over the same eval set, side by side.
+
+    `axis` says which half of the pipeline moved: "retriever" holds the judge still and
+    reports support ranks, "judge" holds the retriever still and reports how much
+    evidence each judge was willing to accept.
+    """
+    fixed_kind = "judge" if axis == "retriever" else "retriever"
     lines = [
-        f"rag-triage comparison  {len(comparisons)} cases  |  {chunks} chunks  |  "
-        f"judge {judge}  |  k={k}",
+        f"rag-triage {axis} comparison  {len(comparisons)} cases  |  {chunks} chunks  |  "
+        f"{fixed_kind} {fixed}  |  k={k}",
         f"  A  {name_a}",
         f"  B  {name_b}",
         "",
     ]
 
     width = max([len(c.case_id) for c in comparisons] + [4])
-    lines.append(
-        f"  {'case'.ljust(width)}  {'A verdict'.ljust(19)}  {'B verdict'.ljust(19)}  "
-        f"{'A rank'.ljust(6)}  B rank"
-    )
-    lines.append(f"  {'-' * width}  {'-' * 19}  {'-' * 19}  ------  ------")
+    if axis == "retriever":
+        lines.append(
+            f"  {'case'.ljust(width)}  {'A verdict'.ljust(19)}  {'B verdict'.ljust(19)}  "
+            f"{'A rank'.ljust(6)}  B rank"
+        )
+        lines.append(f"  {'-' * width}  {'-' * 19}  {'-' * 19}  ------  ------")
+    else:
+        lines.append(
+            f"  {'case'.ljust(width)}  {'A verdict'.ljust(19)}  {'B verdict'.ljust(19)}  "
+            f"{'A support'.ljust(9)}  B support"
+        )
+        lines.append(f"  {'-' * width}  {'-' * 19}  {'-' * 19}  ---------  ---------")
 
     # Cases that moved go first - they are the only reason to run a comparison at all.
     for c in sorted(comparisons, key=lambda c: (not c.verdict_changed, c.case_id)):
+        if axis == "retriever":
+            val_a = _rank(c.a).ljust(6)
+            val_b = _rank(c.b).ljust(6)
+        else:
+            val_a = str(len(c.a.support)).ljust(9)
+            val_b = str(len(c.b.support)).ljust(9)
         row = (
             f"  {c.case_id.ljust(width)}  {c.a.verdict.value.ljust(19)}  "
-            f"{c.b.verdict.value.ljust(19)}  {_rank(c.a).ljust(6)}  {_rank(c.b).ljust(6)}"
+            f"{c.b.verdict.value.ljust(19)}  {val_a}  {val_b}"
         )
         lines.append(f"{row} *" if c.verdict_changed else row.rstrip())
 
-    lines += [
-        "",
-        "changed",
-        f"  {summary.changed} of {len(comparisons)} cases get a different verdict",
-        "",
-        "retrieval",
-        f"  A got the evidence to the model in {summary.a_retrieved} of "
-        f"{len(comparisons)} cases, B in {summary.b_retrieved}",
-    ]
-    if summary.gains:
-        lines.append(f"  B found it where A did not: {_ids(summary.gains)}")
-    if summary.regressions:
-        lines.append(f"  B lost it where A found it: {_ids(summary.regressions)}")
+    if axis == "retriever":
+        lines += [
+            "",
+            "changed",
+            f"  {summary.changed} of {len(comparisons)} cases get a different verdict",
+            "",
+            "retrieval",
+            f"  A got the evidence to the model in {summary.a_retrieved} of "
+            f"{len(comparisons)} cases, B in {summary.b_retrieved}",
+        ]
+        if summary.gains:
+            lines.append(f"  B found it where A did not: {_ids(summary.gains)}")
+        if summary.regressions:
+            lines.append(f"  B lost it where A found it: {_ids(summary.regressions)}")
 
-    moves = sorted(
-        summary.rank_gains + summary.rank_regressions, key=lambda c: -abs(c.rank_delta)
-    )[:3]
-    if moves:
-        formatted = ", ".join(
-            f"{c.case_id} #{c.a.best_support_rank} -> #{c.b.best_support_rank}" for c in moves
-        )
-        lines.append(f"  biggest rank moves: {formatted}")
-    return "\n".join(lines + ["", "reading it"] + _comparison_advice(summary, len(comparisons)))
+        moves = sorted(
+            summary.rank_gains + summary.rank_regressions, key=lambda c: -abs(c.rank_delta)
+        )[:3]
+        if moves:
+            formatted = ", ".join(
+                f"{c.case_id} #{c.a.best_support_rank} -> #{c.b.best_support_rank}"
+                for c in moves
+            )
+            lines.append(f"  biggest rank moves: {formatted}")
+    else:
+        if comparisons:
+            lines += [
+                "",
+                "agreement",
+                f"  {summary.unchanged} of {len(comparisons)} cases get the same verdict "
+                f"({summary.agreement:.0%})",
+            ]
+        if summary.shifts:
+            moves = [(f"{before} -> {after}", count) for before, after, count in summary.shifts]
+            move_width = max([len(move) for move, _ in moves] + [24])
+            lines += ["", "disagreements"]
+            lines += [f"  {move.ljust(move_width)}  {count}" for move, count in moves]
+        if summary.masked:
+            lines += [
+                "",
+                "masked failures",
+                f"  {_cases(len(summary.masked))} A calls ok and B does not: "
+                f"{_ids(summary.masked)}",
+                "  these are the failures the cheaper judge is not reporting",
+            ]
+        if summary.false_alarms:
+            lines += [
+                "",
+                "false alarms",
+                f"  {_cases(len(summary.false_alarms))} B calls ok and A does not: "
+                f"{_ids(summary.false_alarms)}",
+            ]
+
+    advice = (
+        _comparison_advice(summary, len(comparisons))
+        if axis == "retriever"
+        else _judge_advice(summary, comparisons)
+    )
+    if advice:
+        lines += ["", "reading it"] + advice
+    return "\n".join(lines)
 
 
 def _comparison_advice(summary: ComparisonSummary, total: int) -> list[str]:
@@ -348,30 +406,92 @@ def _comparison_advice(summary: ComparisonSummary, total: int) -> list[str]:
     return lines
 
 
+def _judge_advice(summary: ComparisonSummary, comparisons: list[CaseComparison]) -> list[str]:
+    """Which way the two judges disagree, which is the only reason to run this axis."""
+    lines = []
+    if summary.masked and summary.false_alarms:
+        lines.append(
+            "  the two judges disagree in both directions, so neither is a strict superset "
+            "of the other - read the disagreeing cases one by one"
+        )
+    elif summary.masked:
+        lines.append(
+            f"  A is the judge you would run in CI, and it passes "
+            f"{_cases(len(summary.masked))} that B fails - on this set the cheap judge is "
+            "the one hiding failures, not the one inventing them"
+        )
+    elif summary.false_alarms:
+        lines.append(
+            f"  the disagreement runs the other way: A fails "
+            f"{_cases(len(summary.false_alarms))} that B clears, so the cheap judge is "
+            "over-reporting rather than missing things"
+        )
+    elif summary.changed == 0:
+        lines.append(
+            "  the two judges agree on every case, so on this eval set the cheaper one is "
+            "the one to run"
+        )
+    else:
+        lines.append(
+            "  the judges never disagree about whether a case passes, only about which stage "
+            "to blame for it - so the risk here is fixing the wrong half of the pipeline, "
+            "not shipping a failure"
+        )
+
+    if any(not c.evidence_shared for c in comparisons):
+        lines.append(
+            "  each judge located its own evidence, so a missing_from_corpus only one side "
+            "reports is the two judges disagreeing about the corpus, not the corpus changing"
+        )
+
+    if summary.changed and summary.changed != len(comparisons):
+        lines.append(
+            f"  {_cases(summary.unchanged)} land on the same verdict either way - "
+            "those verdicts do not depend on which judge you run"
+        )
+    return lines
+
+
 def comparison_to_dict(
     comparisons: list[CaseComparison],
     summary: ComparisonSummary,
     *,
+    axis: str,
     name_a: str,
     name_b: str,
 ) -> dict:
     return {
-        "retrievers": {"a": name_a, "b": name_b},
+        "axis": axis,
+        "arms": {"a": name_a, "b": name_b},
+        "evidence_shared": all(c.evidence_shared for c in comparisons),
         "summary": {
             "changed": summary.changed,
             "unchanged": summary.unchanged,
+            "agreement": round(summary.agreement, 3),
             "a_retrieved": summary.a_retrieved,
             "b_retrieved": summary.b_retrieved,
+            "gains": [c.case_id for c in summary.gains],
+            "regressions": [c.case_id for c in summary.regressions],
+            "masked": [c.case_id for c in summary.masked],
+            "false_alarms": [c.case_id for c in summary.false_alarms],
+            "shifts": [{"from": a, "to": b, "count": n} for a, b, n in summary.shifts],
         },
         "cases": [
             {
                 "id": c.case_id,
-                # One list, not one per side: the evidence is located once and shared.
-                "evidence_chunks": [hit.chunk.id for hit in c.a.support],
-                "a": {"verdict": c.a.verdict.value, "support_rank": c.a.best_support_rank},
-                "b": {"verdict": c.b.verdict.value, "support_rank": c.b.best_support_rank},
                 "verdict_changed": c.verdict_changed,
                 "rank_delta": c.rank_delta,
+                # Evidence lives per arm: on the judge axis arms can find different evidence.
+                "a": {
+                    "verdict": c.a.verdict.value,
+                    "support_rank": c.a.best_support_rank,
+                    "evidence_chunks": [hit.chunk.id for hit in c.a.support],
+                },
+                "b": {
+                    "verdict": c.b.verdict.value,
+                    "support_rank": c.b.best_support_rank,
+                    "evidence_chunks": [hit.chunk.id for hit in c.b.support],
+                },
             }
             for c in comparisons
         ],
