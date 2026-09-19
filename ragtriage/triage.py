@@ -48,7 +48,14 @@ def triage_case(
     retriever: Retriever,
     judge,
     config: TriageConfig | None = None,
+    evidence: list[Hit] | None = None,
 ) -> CaseResult:
+    """Classify one case. `evidence` skips the corpus scan when the caller already did it.
+
+    Whether the gold answer is backed by the corpus at all does not depend on the
+    retriever under test, so a caller comparing two retrievers locates it once and
+    passes it to both - see compare().
+    """
     config = config or TriageConfig()
     notes: list[str] = []
 
@@ -62,7 +69,7 @@ def triage_case(
     else:
         retrieved = question_ranking[: config.k]
 
-    support = find_support(retriever, judge, case.gold, config)
+    support = find_support(retriever, judge, case.gold, config) if evidence is None else evidence
     support_ids = {hit.chunk.id for hit in support}
     best_rank = min(
         (ranks[cid] for cid in support_ids if cid in ranks),
