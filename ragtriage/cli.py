@@ -7,10 +7,19 @@ import json
 import sys
 from pathlib import Path
 
+from .compare import compare, summarize_comparison
 from .corpus import load_corpus, load_evalset
 from .judge import LexicalJudge
 from .models import Verdict
-from .report import render_case, render_html, render_markdown, render_text, to_dict
+from .report import (
+    comparison_to_dict,
+    render_case,
+    render_comparison,
+    render_html,
+    render_markdown,
+    render_text,
+    to_dict,
+)
 from .retriever import BM25Retriever
 from .triage import TriageConfig, triage_all
 from .vectors import VectorRetriever, embed_inputs, load_vectors
@@ -46,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="write the chunk and query texts that a --vectors file must cover, then exit",
     )
     parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="run the BM25 baseline and the --vectors retriever side by side",
+    )
+    parser.add_argument(
         "--explain",
         metavar="CASE_ID",
         help="print the full trace for one case instead of the summary table",
@@ -58,7 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", dest="json_out", help="write the full result as JSON")
     parser.add_argument("--markdown", dest="md_out", help="write a markdown report")
     parser.add_argument("--html", dest="html_out", help="write a self-contained HTML report")
-    parser.add_argument("--strict", action="store_true", help="exit 1 if any case is not ok")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit 1 if any case is not ok, or with --compare if B loses evidence A found",
+    )
     return parser
 
 
@@ -93,6 +111,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.compare:
+        if not args.vectors:
+            print(
+                "rag-triage: --compare needs --vectors: "
+                "it compares the bm25 baseline against a vector retriever",
+                file=sys.stderr,
+            )
+            return 2
+        if args.explain:
+            print("rag-triage: --compare and --explain cannot be used together", file=sys.stderr)
+            return 2
+        if args.md_out or args.html_out:
+            print("rag-triage: --compare writes text and --json only", file=sys.stderr)
+            return 2
+
     if args.explain and not any(case.id == args.explain for case in cases):
         known = ", ".join(case.id for case in cases)
         print(f"rag-triage: no case {args.explain!r} in the eval set. Known ids: {known}",
@@ -106,6 +139,56 @@ def main(argv: list[str] | None = None) -> int:
     else:
         judge = LexicalJudge()
 
+    config = TriageConfig(
+        k=args.k, support_scan=args.support_scan, claim_detail=not args.no_claim_detail
+    )
+
+    if args.compare:
+        try:
+            retriever_a = BM25Retriever(chunks)
+            retriever_b = _build_retriever(chunks, args.vectors)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            print(f"rag-triage: {exc}", file=sys.stderr)
+            return 2
+
+        try:
+            comparisons = compare(cases, retriever_a, retriever_b, judge, config)
+        except (ValueError, LookupError) as exc:
+            print(f"rag-triage: {exc}", file=sys.stderr)
+            return 2
+
+        summary = summarize_comparison(comparisons)
+        print(
+            render_comparison(
+                comparisons,
+                summary,
+                chunks=len(chunks),
+                judge=judge.name,
+                k=args.k,
+                name_a=retriever_a.name,
+                name_b=retriever_b.name,
+            )
+        )
+
+        usage = getattr(judge, "usage", None)
+        if usage is not None and usage.calls:
+            print(f"\njudge usage\n  {usage.summary()}")
+
+        if args.json_out:
+            payload = comparison_to_dict(
+                comparisons,
+                summary,
+                name_a=retriever_a.name,
+                name_b=retriever_b.name,
+            )
+            try:
+                Path(args.json_out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except OSError as exc:
+                print(f"rag-triage: could not write report: {exc}", file=sys.stderr)
+                return 2
+
+        return 1 if (args.strict and summary.regressions) else 0
+
     # --explain is a drill-down, so only the case being explained is worth triaging.
     if args.explain:
         cases = [case for case in cases if case.id == args.explain]
@@ -116,9 +199,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"rag-triage: {exc}", file=sys.stderr)
         return 2
 
-    config = TriageConfig(
-        k=args.k, support_scan=args.support_scan, claim_detail=not args.no_claim_detail
-    )
     try:
         results = triage_all(cases, retriever, judge, config)
     except (ValueError, LookupError) as exc:

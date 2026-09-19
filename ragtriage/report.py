@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from html import escape
 
+from .compare import CaseComparison, ComparisonSummary
 from .models import VERDICT_FIX, CaseResult, Verdict
 from .triage import summarize
 
@@ -44,8 +45,9 @@ def render_text(
     lines.append(f"  {'case'.ljust(width)}  {'verdict'.ljust(19)}  support rank")
     lines.append(f"  {'-' * width}  {'-' * 19}  ------------")
     for result in by_verdict(results):
-        rank = "-" if result.best_support_rank is None else f"#{result.best_support_rank}"
-        lines.append(f"  {result.case.id.ljust(width)}  {result.verdict.value.ljust(19)}  {rank}")
+        lines.append(
+            f"  {result.case.id.ljust(width)}  {result.verdict.value.ljust(19)}  {_rank(result)}"
+        )
 
     counts = summarize(results)
     lines += ["", "summary"]
@@ -249,6 +251,143 @@ def to_dict(results: list[CaseResult]) -> dict:
             for result in results
         ],
     }
+
+
+def render_comparison(
+    comparisons: list[CaseComparison],
+    summary: ComparisonSummary,
+    *,
+    chunks: int,
+    judge: str,
+    k: int,
+    name_a: str,
+    name_b: str,
+) -> str:
+    """Two retrievers over the same eval set, verdict and support rank side by side."""
+    lines = [
+        f"rag-triage comparison  {len(comparisons)} cases  |  {chunks} chunks  |  "
+        f"judge {judge}  |  k={k}",
+        f"  A  {name_a}",
+        f"  B  {name_b}",
+        "",
+    ]
+
+    width = max([len(c.case_id) for c in comparisons] + [4])
+    lines.append(
+        f"  {'case'.ljust(width)}  {'A verdict'.ljust(19)}  {'B verdict'.ljust(19)}  "
+        f"{'A rank'.ljust(6)}  B rank"
+    )
+    lines.append(f"  {'-' * width}  {'-' * 19}  {'-' * 19}  ------  ------")
+
+    # Cases that moved go first - they are the only reason to run a comparison at all.
+    for c in sorted(comparisons, key=lambda c: (not c.verdict_changed, c.case_id)):
+        row = (
+            f"  {c.case_id.ljust(width)}  {c.a.verdict.value.ljust(19)}  "
+            f"{c.b.verdict.value.ljust(19)}  {_rank(c.a).ljust(6)}  {_rank(c.b).ljust(6)}"
+        )
+        lines.append(f"{row} *" if c.verdict_changed else row.rstrip())
+
+    lines += [
+        "",
+        "changed",
+        f"  {summary.changed} of {len(comparisons)} cases get a different verdict",
+        "",
+        "retrieval",
+        f"  A got the evidence to the model in {summary.a_retrieved} of "
+        f"{len(comparisons)} cases, B in {summary.b_retrieved}",
+    ]
+    if summary.gains:
+        lines.append(f"  B found it where A did not: {_ids(summary.gains)}")
+    if summary.regressions:
+        lines.append(f"  B lost it where A found it: {_ids(summary.regressions)}")
+
+    moves = sorted(
+        summary.rank_gains + summary.rank_regressions, key=lambda c: -abs(c.rank_delta)
+    )[:3]
+    if moves:
+        formatted = ", ".join(
+            f"{c.case_id} #{c.a.best_support_rank} -> #{c.b.best_support_rank}" for c in moves
+        )
+        lines.append(f"  biggest rank moves: {formatted}")
+    return "\n".join(lines + ["", "reading it"] + _comparison_advice(summary, len(comparisons)))
+
+
+def _comparison_advice(summary: ComparisonSummary, total: int) -> list[str]:
+    """The paragraph someone acts on: which retriever to keep, and what it will not fix."""
+    lines = []
+    if summary.regressions and summary.gains:
+        lines.append(
+            f"  the two retrievers trade places: B fixes {_cases(len(summary.gains))} and "
+            f"breaks {_cases(len(summary.regressions))}, so neither dominates on this set"
+        )
+    elif summary.regressions:
+        lines.append(
+            f"  B is the weaker retriever here - {_cases(len(summary.regressions))} where A got "
+            "the evidence into the context and B did not, and none the other way"
+        )
+    elif summary.gains:
+        lines.append(
+            f"  B is the stronger retriever here - it fixes {_cases(len(summary.gains))} and "
+            "breaks none"
+        )
+    else:
+        lines.append("  both retrievers get the evidence to the model on exactly the same cases")
+
+    if summary.rank_gains or summary.rank_regressions:
+        lines.append(
+            "  rank moves without a verdict change are headroom: they say how much k the case "
+            "is buying itself before it starts failing"
+        )
+
+    stuck = total - summary.changed
+    if stuck:
+        lines.append(
+            f"  {_cases(stuck)} land on the same verdict either way - whatever is wrong with "
+            "them, switching between these two retrievers does not fix it"
+        )
+    return lines
+
+
+def comparison_to_dict(
+    comparisons: list[CaseComparison],
+    summary: ComparisonSummary,
+    *,
+    name_a: str,
+    name_b: str,
+) -> dict:
+    return {
+        "retrievers": {"a": name_a, "b": name_b},
+        "summary": {
+            "changed": summary.changed,
+            "unchanged": summary.unchanged,
+            "a_retrieved": summary.a_retrieved,
+            "b_retrieved": summary.b_retrieved,
+        },
+        "cases": [
+            {
+                "id": c.case_id,
+                # One list, not one per side: the evidence is located once and shared.
+                "evidence_chunks": [hit.chunk.id for hit in c.a.support],
+                "a": {"verdict": c.a.verdict.value, "support_rank": c.a.best_support_rank},
+                "b": {"verdict": c.b.verdict.value, "support_rank": c.b.best_support_rank},
+                "verdict_changed": c.verdict_changed,
+                "rank_delta": c.rank_delta,
+            }
+            for c in comparisons
+        ],
+    }
+
+
+def _rank(result: CaseResult) -> str:
+    return "-" if result.best_support_rank is None else f"#{result.best_support_rank}"
+
+
+def _ids(comparisons: list[CaseComparison]) -> str:
+    return ", ".join(c.case_id for c in comparisons)
+
+
+def _cases(n: int) -> str:
+    return f"{n} case" if n == 1 else f"{n} cases"
 
 
 def _hit_line(hit) -> str:
