@@ -92,5 +92,42 @@ class LexicalJudge:
         )
 
 
+def build_judge(spec: str, model: str | None = None):
+    """Build a judge from a short spec string: 'lexical', 'lexical@0.8' or 'claude'.
+
+    The optional `@value` tunes the support threshold only. That is the method the
+    decision tree leans on hardest - evidence location, groundedness and the
+    per-sentence check all go through `supports` - so it is the one knob worth
+    exposing, and varying it is how you find out which verdicts are really findings
+    and which are artefacts of where the threshold happens to sit.
+    """
+    if not (spec or "").strip():
+        raise ValueError("judge spec is empty")
+
+    name, _, arg = spec.strip().partition("@")
+
+    if name == "lexical":
+        if not arg:
+            return LexicalJudge()
+        try:
+            threshold = float(arg)
+        except ValueError:
+            raise ValueError(f"not a number in judge spec: {arg!r}") from None
+        if not 0.0 < threshold <= 1.0:
+            raise ValueError(f"judge threshold must be between 0 and 1, got {arg!r}")
+        judge = LexicalJudge(support_threshold=threshold)
+        judge.name = f"lexical@{threshold:g}"
+        return judge
+
+    if name == "claude":
+        if arg:
+            raise ValueError("the claude judge has no threshold; use 'claude' on its own")
+        from .claude_judge import ClaudeJudge
+
+        return ClaudeJudge(model=model) if model else ClaudeJudge()
+
+    raise ValueError(f"unknown judge {name!r}: expected 'lexical' or 'claude'")
+
+
 def _numbers(text: str) -> set[str]:
     return {match.group().replace(",", ".").rstrip(".") for match in _NUMBER.finditer(text)}
