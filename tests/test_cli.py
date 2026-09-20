@@ -201,14 +201,31 @@ def test_compare_with_markdown_exits_with_two(vectors_file, tmp_path, capsys):
     out = ["--markdown", str(tmp_path / "out.md")]
     args = ARGS + ["--compare", "--vectors", str(vectors_file)] + out
     assert main(args) == 2
-    assert "--compare writes text and --json only" in capsys.readouterr().err
+    assert "--markdown is a single-run report" in capsys.readouterr().err
 
 
-def test_compare_with_html_exits_with_two(vectors_file, tmp_path, capsys):
-    out = ["--html", str(tmp_path / "out.html")]
-    args = ARGS + ["--compare", "--vectors", str(vectors_file)] + out
-    assert main(args) == 2
-    assert "--compare writes text and --json only" in capsys.readouterr().err
+def test_compare_writes_html_report(vectors_file, tmp_path):
+    html_path = tmp_path / "comparison.html"
+    args = ARGS + ["--compare", "--vectors", str(vectors_file), "--html", str(html_path)]
+    assert main(args) == 0
+
+    html = html_path.read_text(encoding="utf-8")
+    assert "rag-triage retriever comparison" in html
+    assert "vectors:hash-demo" in html
+    assert "support rank" in html
+    assert "<script" not in html
+    assert "http://" not in html and "https://" not in html
+
+
+def test_compare_judge_writes_html_report(tmp_path):
+    html_path = tmp_path / "judges.html"
+    args = ARGS + ["--compare", "judge", "--judge-b", "lexical@0.4", "--html", str(html_path)]
+    assert main(args) == 0
+
+    html = html_path.read_text(encoding="utf-8")
+    assert "rag-triage judge comparison" in html
+    assert "evidence chunks" in html
+    assert "support rank" not in html
 
 
 def test_compare_prints_side_by_side_table(vectors_file, capsys):

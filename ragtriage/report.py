@@ -5,7 +5,7 @@ from __future__ import annotations
 import textwrap
 from html import escape
 
-from .compare import CaseComparison, ComparisonSummary
+from .compare import CaseComparison, ComparisonSummary, claim_divergences
 from .models import VERDICT_FIX, CaseResult, Verdict
 from .triage import summarize
 
@@ -506,6 +506,214 @@ def comparison_to_dict(
     }
 
 
+def render_comparison_html(
+    comparisons: list[CaseComparison],
+    summary: ComparisonSummary,
+    *,
+    axis: str,
+    chunks: int,
+    k: int,
+    name_a: str,
+    name_b: str,
+    fixed: str,
+) -> str:
+    """The HTML twin of render_comparison, one card per case with both arms side by side."""
+    fixed_kind = "judge" if axis == "retriever" else "retriever"
+
+    # Same CSS-only filter trick as the single-run report: a hidden radio per tile and
+    # rules that hide every card the tile does not select.
+    filters = [("all", "all", len(comparisons))]
+    if summary.changed:
+        filters.append(("changed", "changed", summary.changed))
+    if summary.unchanged:
+        filters.append(("same", "same", summary.unchanged))
+    if axis == "retriever" and summary.regressions:
+        filters.append(("regression", "evidence lost", len(summary.regressions)))
+    if axis == "judge" and summary.masked:
+        filters.append(("masked", "masked", len(summary.masked)))
+
+    radios = "".join(
+        f'<input type="radio" name="filter" id="f-{slug}"{" checked" if slug == "all" else ""}>'
+        for slug, _, _ in filters
+    )
+    tiles = "".join(
+        f'<label class="tile {slug}" for="f-{slug}"><b>{count}</b><span>{label}</span></label>'
+        for slug, label, count in filters
+    )
+    filter_css = "\n".join(
+        f'#f-{slug}:checked ~ .tiles label[for="f-{slug}"] {{ background:#000 }}'
+        + (
+            ""
+            if slug == "all"
+            else f"\n#f-{slug}:checked ~ .cards .case:not(.c-{slug}) {{ display:none }}"
+        )
+        for slug, _, _ in filters
+    )
+
+    advice = (
+        _comparison_advice(summary, len(comparisons))
+        if axis == "retriever"
+        else _judge_advice(summary, comparisons)
+    )
+    reading_it = ""
+    if advice:
+        items = "".join(f"<li>{escape(sentence)}</li>" for sentence in advice)
+        reading_it = f'<section class="reading"><h4>reading it</h4><ul>{items}</ul></section>'
+
+    disagreements = ""
+    if summary.shifts:
+        shifts = "".join(
+            f'<li>{_chip(before)} &rarr; {_chip(after)}<span class="count">x{count}</span></li>'
+            for before, after, count in summary.shifts
+        )
+        disagreements = (
+            f'<section class="reading"><h4>disagreements</h4>'
+            f'<ul class="shifts">{shifts}</ul></section>'
+        )
+
+    regression_ids = {c.case_id for c in summary.regressions}
+    masked_ids = {c.case_id for c in summary.masked}
+    cards = [
+        _comparison_card(
+            c,
+            axis=axis,
+            name_a=name_a,
+            name_b=name_b,
+            lost=c.case_id in (regression_ids if axis == "retriever" else masked_ids),
+        )
+        for c in sorted(comparisons, key=lambda c: (not c.verdict_changed, c.case_id))
+    ]
+
+    return _COMPARE_HTML.format(
+        axis=escape(axis),
+        cases=len(comparisons),
+        chunks=chunks,
+        fixed_kind=fixed_kind,
+        fixed=escape(fixed),
+        k=k,
+        name_a=escape(name_a),
+        name_b=escape(name_b),
+        radios=radios,
+        tiles=tiles,
+        filter_css=filter_css,
+        reading_it=reading_it,
+        disagreements=disagreements,
+        cards="\n".join(cards),
+    )
+
+
+def _comparison_card(
+    c: CaseComparison, *, axis: str, name_a: str, name_b: str, lost: bool
+) -> str:
+    case = c.a.case
+    classes = ["case", "c-changed" if c.verdict_changed else "c-same"]
+    if lost:
+        classes.append("c-regression" if axis == "retriever" else "c-masked")
+
+    tags = "".join(f'<span class="tag">{escape(tag)}</span>' for tag in case.tags)
+    rows = [
+        _comp_row("verdict", _chip(c.a.verdict.value), _chip(c.b.verdict.value)),
+        _comp_row("stage", _STAGE[c.a.verdict], _STAGE[c.b.verdict]),
+        _comp_row("fix", escape(c.a.fix_hint), escape(c.b.fix_hint)),
+    ]
+    if axis == "retriever":
+        rows.append(_comp_row("support rank", _rank(c.a), _rank(c.b)))
+    else:
+        rows.append(_comp_row("evidence chunks", str(len(c.a.support)), str(len(c.b.support))))
+    rows.append(_comp_row("evidence", _chunk_ids(c.a.support), _chunk_ids(c.b.support)))
+
+    return f"""<details class="{" ".join(classes)}">
+<summary><b>{escape(c.case_id)}</b>{_chip(c.a.verdict.value)}&rarr;{_chip(c.b.verdict.value)}
+<em>{escape(_preview(case.question, 90))}</em></summary>
+<dl><dt>gold</dt><dd>{escape(case.gold)}</dd>
+<dt>answer</dt><dd>{escape(case.answer or "(none recorded)")}</dd>
+{f"<dt>tags</dt><dd>{tags}</dd>" if tags else ""}</dl>
+<table><tr><th></th><th>A &middot; {escape(name_a)}</th><th>B &middot; {escape(name_b)}</th></tr>
+{"".join(rows)}</table>
+{_retrieved_diff(c)}
+{_split_sentences(c)}
+{_notes_diff(c)}
+</details>"""
+
+
+def _retrieved_diff(c: CaseComparison) -> str:
+    """Which chunks reached only one of the two arms - empty on the judge axis."""
+    a_ids = [hit.chunk.id for hit in c.a.retrieved]
+    b_ids = [hit.chunk.id for hit in c.b.retrieved]
+    only_a = [cid for cid in a_ids if cid not in set(b_ids)]
+    only_b = [cid for cid in b_ids if cid not in set(a_ids)]
+    if not only_a and not only_b:
+        same = (
+            f"both arms retrieved the same {len(a_ids)} chunks" if a_ids else "nothing retrieved"
+        )
+        return f'<h4>retrieved context</h4><p class="dim">{same}</p>'
+
+    parts = []
+    if only_a:
+        parts.append(f'<dt>only A</dt><dd>{", ".join(_code(cid) for cid in only_a)}</dd>')
+    if only_b:
+        parts.append(f'<dt>only B</dt><dd>{", ".join(_code(cid) for cid in only_b)}</dd>')
+    return f'<h4>retrieved context</h4><dl>{"".join(parts)}</dl>'
+
+
+def _split_sentences(c: CaseComparison) -> str:
+    """The sentences the two arms graded differently, which is where a judge split shows."""
+    divergences = claim_divergences(c)
+    if not divergences:
+        return ""
+    items = "".join(
+        f'<li>{escape(d.text)}<span>'
+        f'A: <em class="{_slug(d.a_supported)}">{_claim_status(d.a_supported)}</em> &middot; '
+        f'B: <em class="{_slug(d.b_supported)}">{_claim_status(d.b_supported)}</em>'
+        f"</span></li>"
+        for d in divergences
+    )
+    return f'<h4>where the judges split</h4><ul class="claims">{items}</ul>'
+
+
+def _notes_diff(c: CaseComparison) -> str:
+    """Only the notes one arm wrote and the other did not - the shared ones say nothing."""
+    only_a = [note for note in c.a.notes if note not in c.b.notes]
+    only_b = [note for note in c.b.notes if note not in c.a.notes]
+    if not only_a and not only_b:
+        return ""
+    parts = []
+    for label, notes in (("A only", only_a), ("B only", only_b)):
+        if notes:
+            items = "".join(f"<li>{escape(note)}</li>" for note in notes)
+            parts.append(f"<dt>{label}</dt><dd><ul>{items}</ul></dd>")
+    return f'<h4>notes</h4><dl>{"".join(parts)}</dl>'
+
+
+def _comp_row(field: str, val_a: str, val_b: str) -> str:
+    """Identical values span both columns, so only the differences pull the eye."""
+    if val_a == val_b:
+        return f'<tr><th>{field}</th><td colspan="2" class="agree">{val_a}</td></tr>'
+    return f'<tr><th>{field}</th><td class="diff">{val_a}</td><td class="diff">{val_b}</td></tr>'
+
+
+def _chip(verdict: str) -> str:
+    return f'<span class="chip {verdict}">{verdict}</span>'
+
+
+def _code(chunk_id: str) -> str:
+    return f"<code>{escape(chunk_id)}</code>"
+
+
+def _chunk_ids(hits) -> str:
+    return ", ".join(_code(hit.chunk.id) for hit in hits) or "nothing in the corpus"
+
+
+def _claim_status(supported: bool | None) -> str:
+    if supported is None:
+        return "not checked"
+    return "supported" if supported else "unsupported"
+
+
+def _slug(supported: bool | None) -> str:
+    return _claim_status(supported).replace(" ", "-")
+
+
 def _rank(result: CaseResult) -> str:
     return "-" if result.best_support_rank is None else f"#{result.best_support_rank}"
 
@@ -591,6 +799,94 @@ ul {{ margin:.3rem 0; padding-left:1.1rem; color:var(--dim) }}
 retriever {retriever} &middot; judge {judge} &middot; k={k}</p>
 {radios}
 <div class="tiles">{tiles}</div>
+<div class="cards">{cards}</div>
+</main></body></html>
+"""
+
+
+_COMPARE_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rag-triage {axis} comparison</title>
+<style>
+:root {{
+  --bg:#11131a; --card:#191c26; --line:#2b3040; --text:#dfe3ee; --dim:#8d94a8;
+  --corpus:#e0654f; --retrieval:#e0a23c; --generation:#7c8ae0; --neutral:#616a85; --ok:#4fae7c;
+}}
+* {{ box-sizing:border-box }}
+body {{ margin:0; padding:2rem 1rem; background:var(--bg); color:var(--text);
+  font:15px/1.55 ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif }}
+main {{ max-width:940px; margin:0 auto }}
+h1 {{ font-size:1.5rem; margin:0 0 .25rem }}
+.meta {{ color:var(--dim); margin:0 0 .4rem }}
+.arms {{ display:flex; gap:1.2rem; margin:0 0 1.5rem; font-size:.9rem }}
+.arms b {{ color:var(--dim); font-weight:normal; margin-right:.35rem }}
+.tiles {{ display:flex; flex-wrap:wrap; gap:.6rem; margin-bottom:1.5rem }}
+.tile {{ flex:1 1 120px; background:var(--card); border:1px solid var(--line);
+  border-left-width:4px; border-radius:8px; padding:.7rem .9rem; cursor:pointer;
+  user-select:none }}
+.tile:hover {{ border-color:var(--dim) }}
+.tile b {{ display:block; font-size:1.6rem; line-height:1.1 }}
+.tile span {{ color:var(--dim); font-size:.8rem }}
+.tile.all {{ border-left-color:var(--dim) }}
+.tile.changed {{ border-left-color:var(--retrieval) }}
+.tile.same {{ border-left-color:var(--ok) }}
+.tile.regression, .tile.masked {{ border-left-color:var(--corpus) }}
+input[name="filter"] {{ display:none }}
+{filter_css}
+.missing_from_corpus {{ border-left-color:var(--corpus) }}
+.retrieval_miss {{ border-left-color:var(--retrieval) }}
+.generation_miss, .ungrounded {{ border-left-color:var(--generation) }}
+.no_answer {{ border-left-color:var(--neutral) }}
+.ok {{ border-left-color:var(--ok) }}
+.reading {{ margin-bottom:1.5rem }}
+.reading ul {{ margin:0; padding-left:1.1rem }}
+.shifts {{ list-style:none; padding:0 }}
+.shifts li {{ display:flex; align-items:center; gap:.5rem; margin-bottom:.35rem }}
+.shifts .count {{ color:var(--dim); font-size:.85rem }}
+.case {{ background:var(--card); border:1px solid var(--line); border-radius:8px;
+  margin-bottom:.6rem; padding:.7rem .9rem }}
+.case.c-changed {{ border-left:4px solid var(--retrieval) }}
+summary {{ cursor:pointer; display:flex; align-items:center; gap:.5rem }}
+summary b {{ white-space:nowrap }}
+summary em {{ color:var(--dim); font-style:normal; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap }}
+.chip {{ font-size:.72rem; padding:.15rem .5rem; border-radius:99px; white-space:nowrap;
+  background:#000a; border:1px solid var(--line); border-left-width:3px }}
+dl {{ display:grid; grid-template-columns:6rem 1fr; gap:.35rem .8rem; margin:0 0 1rem }}
+dt {{ color:var(--dim); font-size:.82rem }}
+dd {{ margin:0 }}
+h4 {{ margin:1rem 0 .4rem; font-size:.8rem; text-transform:uppercase; color:var(--dim);
+  letter-spacing:.06em }}
+table {{ width:100%; border-collapse:collapse; font-size:.85rem }}
+th, td {{ padding:.35rem .5rem; border-top:1px solid var(--line); vertical-align:top;
+  text-align:left }}
+th {{ color:var(--dim); font-weight:normal; width:8rem }}
+td {{ width:auto }}
+td.agree {{ color:var(--dim) }}
+td.diff {{ background:#e0a23c14 }}
+code {{ font-size:.85em; color:#9fb4e8 }}
+ul {{ margin:.3rem 0; padding-left:1.1rem; color:var(--dim) }}
+.claims {{ list-style:none; padding:0 }}
+.claims li {{ padding:.35rem .6rem; border-left:3px solid var(--generation);
+  margin-bottom:.3rem; background:#0006; color:var(--text) }}
+.claims span {{ display:block; color:var(--dim); font-size:.75rem; margin-top:.2rem }}
+.claims em {{ font-style:normal }}
+.supported {{ color:var(--ok) }}
+.unsupported {{ color:var(--corpus) }}
+.not-checked {{ color:var(--dim) }}
+.tag {{ display:inline-block; font-size:.72rem; color:var(--dim); border:1px solid var(--line);
+  border-radius:99px; padding:.05rem .5rem; margin-right:.3rem }}
+.dim {{ color:var(--dim) }}
+</style></head><body><main>
+<h1>rag-triage {axis} comparison</h1>
+<p class="meta">{cases} cases &middot; {chunks} chunks &middot; {fixed_kind} {fixed} &middot;
+k={k}</p>
+<p class="arms"><span><b>A</b>{name_a}</span><span><b>B</b>{name_b}</span></p>
+{radios}
+<div class="tiles">{tiles}</div>
+{reading_it}
+{disagreements}
 <div class="cards">{cards}</div>
 </main></body></html>
 """

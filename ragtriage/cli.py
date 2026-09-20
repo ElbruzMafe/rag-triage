@@ -15,6 +15,7 @@ from .report import (
     comparison_to_dict,
     render_case,
     render_comparison,
+    render_comparison_html,
     render_html,
     render_markdown,
     render_text,
@@ -157,8 +158,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.explain:
             print("rag-triage: --compare and --explain cannot be used together", file=sys.stderr)
             return 2
-        if args.md_out or args.html_out:
-            print("rag-triage: --compare writes text and --json only", file=sys.stderr)
+        if args.md_out:
+            print(
+                "rag-triage: --markdown is a single-run report; "
+                "a comparison writes text, --json and --html",
+                file=sys.stderr,
+            )
             return 2
 
     if args.explain and not any(case.id == args.explain for case in cases):
@@ -226,19 +231,33 @@ def main(argv: list[str] | None = None) -> int:
         )
         _print_judge_usage(judge, judge_b)
 
-        if args.json_out:
-            payload = comparison_to_dict(
-                comparisons,
-                summary,
-                axis=args.compare,
-                name_a=arm_a.label,
-                name_b=arm_b.label,
-            )
-            try:
+        try:
+            if args.json_out:
+                payload = comparison_to_dict(
+                    comparisons,
+                    summary,
+                    axis=args.compare,
+                    name_a=arm_a.label,
+                    name_b=arm_b.label,
+                )
                 Path(args.json_out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            except OSError as exc:
-                print(f"rag-triage: could not write report: {exc}", file=sys.stderr)
-                return 2
+            if args.html_out:
+                Path(args.html_out).write_text(
+                    render_comparison_html(
+                        comparisons,
+                        summary,
+                        axis=args.compare,
+                        chunks=len(chunks),
+                        k=args.k,
+                        name_a=arm_a.label,
+                        name_b=arm_b.label,
+                        fixed=fixed,
+                    ),
+                    encoding="utf-8",
+                )
+        except OSError as exc:
+            print(f"rag-triage: could not write report: {exc}", file=sys.stderr)
+            return 2
 
         losses = summary.masked if args.compare == "judge" else summary.regressions
         return 1 if (args.strict and losses) else 0
