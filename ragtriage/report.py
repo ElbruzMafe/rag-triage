@@ -681,7 +681,7 @@ def _notes_diff(c: CaseComparison) -> str:
     for label, notes in (("A only", only_a), ("B only", only_b)):
         if notes:
             items = "".join(f"<li>{escape(note)}</li>" for note in notes)
-            parts.append(f"<dt>{label}</dt><dd><ul>{items}</ul></dd>")
+            parts.append(f'<dt>{label}</dt><dd><ul class="plain">{items}</ul></dd>')
     return f'<h4>notes</h4><dl>{"".join(parts)}</dl>'
 
 
@@ -867,6 +867,7 @@ td.agree {{ color:var(--dim) }}
 td.diff {{ background:#e0a23c14 }}
 code {{ font-size:.85em; color:#9fb4e8 }}
 ul {{ margin:.3rem 0; padding-left:1.1rem; color:var(--dim) }}
+ul.plain {{ list-style:none; margin:0; padding:0 }}
 .claims {{ list-style:none; padding:0 }}
 .claims li {{ padding:.35rem .6rem; border-left:3px solid var(--generation);
   margin-bottom:.3rem; background:#0006; color:var(--text) }}

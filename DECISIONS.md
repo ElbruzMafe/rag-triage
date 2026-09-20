@@ -259,3 +259,41 @@ something that is red".
 Stage disagreements - both judges fail a case but name different stages - deliberately
 do not trip it. They are worth reading and they are printed, but they are not a broken
 gate; the pipeline is failing either way and the argument is about where to look.
+
+## A sentence one judge never looked at is still a disagreement
+
+The judge comparison could say "A says `ungrounded`, B says `generation_miss`" but not
+which part of the answer the two graders actually read differently. The HTML report adds
+that: the sentences where the arms disagree.
+
+The diff is not symmetric, and the asymmetry is the whole design. Per-sentence checks
+only run on an answer the arm has already called ungrounded, so an arm happy with the
+whole answer produces no sentence checks at all. That leaves three shapes:
+
+- both arms graded the sentence and disagree - a plain disagreement, report it
+- one arm called it *unsupported* and the other never looked - report it, because the
+  other arm not looking is exactly the finding: it was happy with the whole answer
+- one arm called it *supported* and the other never looked - do not report it, because
+  that is agreement expressed two different ways
+
+Without the third rule every sentence of every answer shows up the moment the two arms
+disagree about groundedness, and the two or three sentences that matter are buried. The
+tests pin the rule from both sides: forcing it to always report a one-sided sentence
+breaks one test, forcing it to never report one breaks two others.
+
+## The comparison report earns an HTML view, markdown does not
+
+`--compare` accepts `--json` and `--html` and rejects `--markdown`. That is not an
+oversight. The markdown report is a flat list of cases for pasting into a ticket, and a
+comparison is two-dimensional - every field has an A value and a B value. Rendering that
+as markdown means either a wide table nobody reads or two documents side by side.
+
+HTML already had the machinery this needed: a collapsible card per case, CSS-only
+filters, and no JavaScript, so it still survives being attached to a CI artefact. The
+one thing added for the comparison is that rows where A and B agree collapse into a
+single cell spanning both columns. Nine rows of identical text with two differences in
+them hides the differences; two columns that only fill in when they disagree does not.
+
+The advice paragraph under "reading it" moved for this. It used to be written
+pre-wrapped, as one list entry per terminal line, which made it unusable anywhere but a
+terminal. It is whole sentences now and the text renderer wraps at print time.

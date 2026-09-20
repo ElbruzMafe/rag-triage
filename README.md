@@ -139,6 +139,8 @@ at all.
   a retriever change fixes, breaks, or cannot help
 - `--compare judge` does the same across two judges, so you can see which verdicts
   depend on the grader rather than on the pipeline
+- `--html` on either comparison axis: both arms per case, and the answer sentence the
+  two judges graded differently
 - Text, markdown, HTML and JSON reports; `--strict` exits non-zero for CI
 - Call, token and cost accounting for the Claude judge
 
@@ -262,8 +264,8 @@ without a verdict change are the headroom a case has left.
 
 A case marked `*` is one where the verdict actually changed. `--strict` exits 1 when B
 loses evidence that A got into the context, which makes the comparison usable as a CI
-gate on a retriever change. `--json` writes the same data; `--markdown` and `--html` are
-single-run reports and are rejected here.
+gate on a retriever change. `--json` writes the same data and `--html` writes the long
+version - see below. `--markdown` is a single-run report and is rejected here.
 
 Evidence is located once per case, with A, and handed to both sides. Whether the gold
 answer is backed by the corpus at all is a fact about the corpus, so it must not change
@@ -337,6 +339,42 @@ One honest cost: on this axis the two judges each locate their own evidence, bec
 comparison therefore costs two runs' worth of judge calls, unlike a retriever comparison,
 which costs one. DECISIONS.md has the reasoning.
 
+### The comparison as HTML
+
+The table above says *that* two cases moved. `--html` says why, for both axes:
+
+```bash
+rag-triage --corpus docs/ --evalset eval.yaml --compare judge --judge-b lexical@0.4 \
+  --html judges.html
+```
+
+![judge comparison report](docs/compare-judge.png)
+
+One card per case, both arms side by side. The rows where A and B agree collapse into a
+single cell so only the differences pull the eye - above, `downgrade-timing` has the same
+stage on both sides but a different verdict, a different fix, and one arm willing to call
+three chunks evidence where the other accepts one.
+
+The section worth having is `where the judges split`. A verdict comparison can only say
+"A says ungrounded, B says generation_miss"; this names the sentence they disagree about:
+
+```
+where the judges split
+  Downgrades apply immediately and the seats are removed straight away.
+  A: unsupported  -  B: not checked
+```
+
+`not checked` is not a gap in the report, it is the finding. The per-sentence pass only
+runs on an answer the arm has already called ungrounded, so B never looked at this
+sentence - the whole disagreement is that B was happy with the answer as a whole. A
+sentence only one arm graded is listed only when that arm called it unsupported; the
+other direction is agreement expressed two different ways, and listing it would bury the
+real splits under every sentence of every answer.
+
+The tiles filter, same as the single-run report: `changed` / `same`, plus `evidence lost`
+on the retriever axis or `masked` on the judge axis - the cases `--strict` would fail on.
+Still one file, still no JavaScript.
+
 Reports:
 
 ```bash
@@ -371,10 +409,11 @@ ragtriage/
   claude_judge.py  Claude judge, same protocol, plus usage accounting
   claims.py        sentence splitting and per-sentence grounding
   triage.py        the decision tree that assigns a verdict
-  compare.py       two retrievers over one eval set, paired by case
+  compare.py       two arms over one eval set, paired by case
   report.py        text, markdown, HTML and JSON rendering
   cli.py           argparse entry point
 examples/          sample docs, an eval set covering every verdict, hash_vectors.py
+docs/              screenshots used by this README
 tests/             pytest suite
 ```
 
@@ -393,6 +432,10 @@ tests/             pytest suite
 - A judge comparison costs two evidence scans per case where a retriever comparison
   costs one, so `--compare judge --judge-b claude` on a large eval set is the most
   expensive thing this tool does.
+- The HTML comparison shows which sentences the two judges graded differently, but only
+  for answers at least one arm called ungrounded. Two arms that both call an answer
+  grounded and still disagree about the verdict show no sentence detail, because neither
+  ran a per-sentence check - the diff can only report what was measured.
 - The stemmer is a handful of suffix rules, not Porter. It gets plurals and `-ed`/`-ing`
   right and will mangle irregular words.
 - The default retriever is BM25, so unless you pass `--vectors` or recorded
