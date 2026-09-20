@@ -53,6 +53,44 @@ class CaseComparison:
 
 
 @dataclass(frozen=True)
+class ClaimDivergence:
+    """One sentence of the answer the two arms graded differently.
+
+    `None` means that arm never ran a sentence check at all: the per-sentence pass
+    only runs on an answer the arm has already called ungrounded, so an arm that was
+    happy with the whole answer has nothing to say about its individual sentences.
+    """
+
+    text: str
+    a_supported: bool | None
+    b_supported: bool | None
+
+
+def claim_divergences(comparison: CaseComparison) -> list[ClaimDivergence]:
+    """Sentences where the two arms disagree, which is where a judge split shows up.
+
+    A sentence only one arm graded is reported when that arm called it unsupported.
+    The other direction - one arm is happy with a sentence and the other never looked
+    at it - is agreement expressed two different ways, and listing it would bury the
+    real disagreements under every sentence of every answer.
+    """
+    a_claims = {check.text: check.supported for check in comparison.a.claims}
+    b_claims = {check.text: check.supported for check in comparison.b.claims}
+    ordered = list(a_claims) + [text for text in b_claims if text not in a_claims]
+
+    divergences = []
+    for text in ordered:
+        a = a_claims.get(text)
+        b = b_claims.get(text)
+        if a == b:
+            continue
+        if (a is None and b is not False) or (b is None and a is not False):
+            continue
+        divergences.append(ClaimDivergence(text=text, a_supported=a, b_supported=b))
+    return divergences
+
+
+@dataclass(frozen=True)
 class ComparisonSummary:
     changed: int
     unchanged: int
