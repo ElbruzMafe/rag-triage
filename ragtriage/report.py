@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import textwrap
 from html import escape
 
 from .compare import CaseComparison, ComparisonSummary
@@ -366,8 +367,16 @@ def render_comparison(
         else _judge_advice(summary, comparisons)
     )
     if advice:
-        lines += ["", "reading it"] + advice
+        lines += ["", "reading it"] + _wrapped(advice)
     return "\n".join(lines)
+
+
+def _wrapped(sentences: list[str], width: int = 92) -> list[str]:
+    """Advice is written as whole sentences so the HTML report can reuse it."""
+    lines = []
+    for sentence in sentences:
+        lines += textwrap.wrap(sentence, width=width, initial_indent="  ", subsequent_indent="  ")
+    return lines
 
 
 def _comparison_advice(summary: ComparisonSummary, total: int) -> list[str]:
@@ -375,32 +384,32 @@ def _comparison_advice(summary: ComparisonSummary, total: int) -> list[str]:
     lines = []
     if summary.regressions and summary.gains:
         lines.append(
-            f"  the two retrievers trade places: B fixes {_cases(len(summary.gains))} and "
+            f"the two retrievers trade places: B fixes {_cases(len(summary.gains))} and "
             f"breaks {_cases(len(summary.regressions))}, so neither dominates on this set"
         )
     elif summary.regressions:
         lines.append(
-            f"  B is the weaker retriever here - {_cases(len(summary.regressions))} where A got "
+            f"B is the weaker retriever here - {_cases(len(summary.regressions))} where A got "
             "the evidence into the context and B did not, and none the other way"
         )
     elif summary.gains:
         lines.append(
-            f"  B is the stronger retriever here - it fixes {_cases(len(summary.gains))} and "
+            f"B is the stronger retriever here - it fixes {_cases(len(summary.gains))} and "
             "breaks none"
         )
     else:
-        lines.append("  both retrievers get the evidence to the model on exactly the same cases")
+        lines.append("both retrievers get the evidence to the model on exactly the same cases")
 
     if summary.rank_gains or summary.rank_regressions:
         lines.append(
-            "  rank moves without a verdict change are headroom: they say how much k the case "
+            "rank moves without a verdict change are headroom: they say how much k the case "
             "is buying itself before it starts failing"
         )
 
     stuck = total - summary.changed
     if stuck:
         lines.append(
-            f"  {_cases(stuck)} land on the same verdict either way - whatever is wrong with "
+            f"{_cases(stuck)} land on the same verdict either way - whatever is wrong with "
             "them, switching between these two retrievers does not fix it"
         )
     return lines
@@ -411,41 +420,41 @@ def _judge_advice(summary: ComparisonSummary, comparisons: list[CaseComparison])
     lines = []
     if summary.masked and summary.false_alarms:
         lines.append(
-            "  the two judges disagree in both directions, so neither is a strict superset "
+            "the two judges disagree in both directions, so neither is a strict superset "
             "of the other - read the disagreeing cases one by one"
         )
     elif summary.masked:
         lines.append(
-            f"  A is the judge you would run in CI, and it passes "
+            f"A is the judge you would run in CI, and it passes "
             f"{_cases(len(summary.masked))} that B fails - on this set the cheap judge is "
             "the one hiding failures, not the one inventing them"
         )
     elif summary.false_alarms:
         lines.append(
-            f"  the disagreement runs the other way: A fails "
+            f"the disagreement runs the other way: A fails "
             f"{_cases(len(summary.false_alarms))} that B clears, so the cheap judge is "
             "over-reporting rather than missing things"
         )
     elif summary.changed == 0:
         lines.append(
-            "  the two judges agree on every case, so on this eval set the cheaper one is "
+            "the two judges agree on every case, so on this eval set the cheaper one is "
             "the one to run"
         )
     else:
-        lines += [
-            "  no case changes sides - the judges only disagree about which stage to blame,",
-            "  so the risk here is fixing the wrong half of the pipeline, not shipping a failure",
-        ]
+        lines.append(
+            "no case changes sides - the judges only disagree about which stage to blame, "
+            "so the risk here is fixing the wrong half of the pipeline, not shipping a failure"
+        )
 
     if any(not c.evidence_shared for c in comparisons):
-        lines += [
-            "  each judge located its own evidence, so a missing_from_corpus only one side",
-            "  reports is the judges disagreeing about the corpus, not the corpus changing",
-        ]
+        lines.append(
+            "each judge located its own evidence, so a missing_from_corpus only one side "
+            "reports is the judges disagreeing about the corpus, not the corpus changing"
+        )
 
     if summary.changed and summary.changed != len(comparisons):
         lines.append(
-            f"  {_cases(summary.unchanged)} land on the same verdict either way - "
+            f"{_cases(summary.unchanged)} land on the same verdict either way - "
             "those verdicts do not depend on which judge you run"
         )
     return lines
